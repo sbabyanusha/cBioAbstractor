@@ -1,0 +1,6 @@
+{
+  "id": "003",
+  "type": "mutation",
+  "description": "Simple mutation file with gene, sample, chromosomal coordinates and protein change",
+  "created_at": "2025-01-01T00:00:00"
+}

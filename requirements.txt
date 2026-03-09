@@ -1,0 +1,19 @@
+# Original dependencies
+fastapi
+uvicorn
+pypdf2
+python-docx
+pandas
+openpyxl
+ollama
+langchain
+chromadb
+langchain-openai
+langchain-community
+langchain-chroma
+
+# cBioPortal Transformer additions
+anthropic>=0.25.0
+chardet
+streamlit>=1.35.0
+requests

@@ -1,0 +1,4 @@
+gene	sample	chrom	pos_start	pos_end	ref_allele	alt_allele	mutation_type	protein_change
+TP53	S001	17	7675088	7675088	C	T	Missense_Mutation	p.R248W
+KRAS	S002	12	25398284	25398284	C	A	Missense_Mutation	p.G12V
+BRCA1	S001	17	43071077	43071077	A	T	Nonsense_Mutation	p.K1690*

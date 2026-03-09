@@ -1,0 +1,4 @@
+Hugo_Symbol	Entrez_Gene_Id	NCBI_Build	Chromosome	Start_Position	End_Position	Strand	Variant_Classification	Variant_Type	Reference_Allele	Tumor_Seq_Allele1	Tumor_Seq_Allele2	Tumor_Sample_Barcode	HGVSp_Short
+TP53	7157	GRCh37	17	7675088	7675088	+	Missense_Mutation	SNP	C	C	T	S001	p.R248W
+KRAS	3845	GRCh37	12	25398284	25398284	+	Missense_Mutation	SNP	C	C	A	S002	p.G12V
+BRCA1	672	GRCh37	17	43071077	43071077	+	Nonsense_Mutation	SNP	A	A	T	S001	p.K1690*

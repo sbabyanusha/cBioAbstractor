@@ -1,0 +1,4 @@
+SAMPLE_ID	PATIENT_ID	cancer	subtype	primary_site	sample_type
+S001	PT-001	Breast Invasive Carcinoma	Her2 Enriched	Breast	Primary
+S002	PT-002	Breast Invasive Carcinoma	Basal-like	Breast	Primary
+S003	PT-003	Breast Invasive Carcinoma	Luminal A	Breast	Metastatic

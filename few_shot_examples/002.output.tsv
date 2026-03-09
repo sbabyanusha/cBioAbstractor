@@ -1,0 +1,8 @@
+#Patient Identifier	Sample Identifier	Cancer Type	Cancer Type Detailed	Primary Site	Sample Type
+#Patient identifier	Sample identifier	Cancer type	Cancer type detailed description	Primary tumor site	Type of sample collected
+#STRING	STRING	STRING	STRING	STRING	STRING
+#1	1	3000	2000	1	1
+PATIENT_ID	SAMPLE_ID	CANCER_TYPE	CANCER_TYPE_DETAILED	PRIMARY_SITE	SAMPLE_TYPE
+PT-001	S001	Breast	Breast Invasive Carcinoma	Breast	primary
+PT-002	S002	Breast	Breast Invasive Carcinoma	Breast	primary
+PT-003	S003	Breast	Breast Invasive Carcinoma	Breast	metastatic

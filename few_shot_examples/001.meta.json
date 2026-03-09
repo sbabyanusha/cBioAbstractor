@@ -1,0 +1,6 @@
+{
+  "id": "001",
+  "type": "clinical_patient",
+  "description": "REDCap-style clinical file with vital_status, survival_months, age and gender",
+  "created_at": "2025-01-01T00:00:00"
+}
