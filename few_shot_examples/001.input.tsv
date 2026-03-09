@@ -1,0 +1,4 @@
+PatientID	vital_status	survival_months	age_at_diagnosis	gender	disease_free_months	disease_free_status
+PT-001	Alive	24.5	62	Male	24.5	DiseaseFree
+PT-002	Dead	18.0	55	Female	12.0	Recurred
+PT-003	Alive	36.2	70	Male	36.2	DiseaseFree
