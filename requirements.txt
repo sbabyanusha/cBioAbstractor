@@ -1,29 +1,29 @@
 # ── Web framework ─────────────────────────────────────────────────────────────
-fastapi
-uvicorn[standard]
-python-multipart          # required for FastAPI File / Form uploads
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20      # required for FastAPI File / Form uploads
 
 # ── LLM / RAG stack ───────────────────────────────────────────────────────────
-langchain
-langchain-openai
-langchain-community
-langchain-chroma
-chromadb
-openai
+langchain==0.3.20
+langchain-openai==0.3.8
+langchain-community==0.3.19
+langchain-chroma==0.2.2
+chromadb==0.6.3
+openai==1.68.2
 
-# ── Document processing ────────────────────────────────────────────────────────
-PyPDF2                    # PDF text extraction
-python-docx               # DOCX generation (curation report)
-openpyxl                  # Excel reading (supplementary files)
-pandas
-numpy
-xlrd                      # Legacy .xls support
-chardet                   # Encoding detection (file_parser.py)
+# ── Document processing ───────────────────────────────────────────────────────
+pypdf==5.4.0                  # replaces pypdf2
+python-docx==1.1.2            # DOCX generation + reading
+openpyxl==3.1.5               # Excel reading
+pandas==2.2.3                 # DataFrame manipulation
+xlrd==2.0.1                   # Legacy .xls support
+pdfplumber==0.11.4            # PDF table extraction for supplementary files
 
-# ── Streamlit UI ───────────────────────────────────────────────────────────────
-streamlit
-requests
-plotly
+# ── Streamlit UI ──────────────────────────────────────────────────────────────
+streamlit==1.41.1
+altair==4.2.2                 # pinned — must match streamlit 1.41.x
+requests==2.32.3
+plotly==5.24.1
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
-python-dotenv             # Optional .env support
+python-dotenv==1.0.1
