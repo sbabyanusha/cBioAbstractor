@@ -38,7 +38,13 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 from utils import load_chat_model
-from langchain_core.messages import HumanMessage, SystemMessage
+try:
+    from langchain_core.messages import HumanMessage, SystemMessage
+except ImportError:
+    # langchain not installed — _extract_metadata_llm will be bypassed
+    # by streamlit_app_new.py which calls the Anthropic SDK directly.
+    HumanMessage = None
+    SystemMessage = None
 from spec_match import classify_sheet, ClassificationResult
 from cbioportal_spec import SPEC_BY_KEY
 
@@ -323,6 +329,11 @@ def _extract_metadata_regex(pdf_text: str) -> dict:
     """
     import re as _re
 
+    # Normalize whitespace — PDF line-wrapping splits phrases like
+    # "25 pancreatic ductal adenocarcinoma (PDAC)\npatients" across lines,
+    # breaking numeric patterns. Collapse all whitespace to single spaces.
+    pdf_text_norm = _re.sub(r"\s+", " ", pdf_text)
+
     def _first(patterns, text, default=""):
         for pat in patterns:
             m = _re.search(pat, text, _re.IGNORECASE)
@@ -339,25 +350,62 @@ def _extract_metadata_regex(pdf_text: str) -> dict:
                         return g.strip()
         return default
 
-    # ── Title: join lines after DOI line until author line starts ─────────
-    doi_match  = _re.search(r"10\.[0-9]{4,}/\S+", pdf_text)
+    # ── Title detection: try multiple strategies ─────────────────────────
     title = "Study Title Not Detected"
-    if doi_match:
-        after_doi = pdf_text[doi_match.end():]
-        title_lines = []
-        for l in after_doi.splitlines():
-            l = l.strip()
-            if not l:
-                continue
-            # Author lines contain superscript digits attached to surnames
-            if _re.search(r"[A-Z][a-z]+\d", l) or _re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+\d", l):
+
+    # Strategy 1: lines before first author block (typical journal layout)
+    # Article title usually appears in all-caps or title-case before author names
+    title_candidates = []
+    for l in pdf_text.splitlines()[:60]:   # first 60 lines of PDF text
+        l = l.strip()
+        if not l or len(l) < 15:
+            continue
+        # Skip journal name lines (all caps, short)
+        if l.isupper() and len(l) < 30:
+            continue
+        # Skip lines that look like author lists (contains superscript-style digits)
+        if _re.search(r"[A-Z][a-z]+[,\d]", l):
+            continue
+        # Skip DOI lines, page numbers, volume info
+        if _re.search(r"10\.\d{4,}/|doi\.org|^\d+$|\bVol\b|\bDOI\b", l, _re.I):
+            continue
+        # A title-like line: 20-300 chars, contains meaningful words
+        if 20 < len(l) < 300 and any(w in l.lower() for w in
+           ["genomic","transcriptom","landscape","characteriz","sequenc","mutati","cancer",
+            "tumor","tumour","invasion","pathway","single-cell","spatial","clinical","integrat",
+            "molecular","expression","profiling","analysis","identifies","reveals","uncover"]):
+            # Stop at citation-style lines (author list, volume/page)
+            if _re.search(r"\b(20\d{2})\b.*\d+[,–-]\d+|et al\.|\bVol\.?\s*\d+\b", l):
                 break
-            if len(l) > 5:
-                title_lines.append(l)
-            if len(title_lines) >= 3:
+            title_candidates.append(l)
+            if len(title_candidates) >= 3:
                 break
-        if title_lines:
-            title = " ".join(title_lines)
+
+    if title_candidates:
+        # Join multi-line titles, cap at 200 chars
+        title = " ".join(title_candidates)[:200]
+
+    # Strategy 2: look after DOI line (some journals print title after DOI)
+    _doi_match_title = _re.search(r"10\.[0-9]{4,}/\S+", pdf_text)
+    if title == "Study Title Not Detected":
+        doi_match = _doi_match_title
+        if doi_match:
+            after_doi = pdf_text[doi_match.end():]
+            title_lines = []
+            for l in after_doi.splitlines():
+                l = l.strip()
+                if not l:
+                    continue
+                if _re.search(r"[A-Z][a-z]+\d", l):
+                    break
+                if len(l) > 5:
+                    title_lines.append(l)
+                if len(title_lines) >= 3:
+                    break
+            if title_lines:
+                title = " ".join(title_lines)
+
+    # Strategy 3: any line that looks like a title
     if title == "Study Title Not Detected":
         for l in pdf_text.splitlines():
             l = l.strip()
@@ -407,8 +455,8 @@ def _extract_metadata_regex(pdf_text: str) -> dict:
     # the SURNAME of the first author.  Author lines look like:
     #   "Feifei Xie1,10,S h u z h e n..."  or  "Smith J1, Jones A2, ..."
     author = ""
-    if doi_match:
-        after_doi = pdf_text[doi_match.end():]
+    if _doi_match_title:
+        after_doi = pdf_text[_doi_match_title.end():]
         for l in after_doi.splitlines():
             l = l.strip()
             if not l:
@@ -453,20 +501,31 @@ def _extract_metadata_regex(pdf_text: str) -> dict:
         genome = ""
 
     # ── Sample / patient counts ───────────────────────────────────────────
+    # NOTE: specific patterns FIRST — generic "(\d+) patients?" last to avoid
+    # matching subgroup sizes (e.g. "8 patients in low-NI group")
     n_samples = _find_int([
-        r"(\d+)\s+(?:tumor|tumour|cancer|primary)\s+samples?",
-        r"(\d+)\s+GISTs?\b",
+        r"collected\s+(\d+)\s+samples?",                        # "collected 62 samples"
+        r"(\d+)\s+samples?,?\s+including",                      # "62 samples, including"
+        r"(\d+)\s+samples?\s+from\s+\d+\s+patients?",        # "62 samples from 25 patients"
+        r"sc/snRNA-?seq\s+on\s+(\d+)\s+samples?",
+        r"(\d+)\s+(?:fresh|ffpe|tissue|tumor|tumour|cancer|primary)\s+samples?",
+        r"n\s*=\s*(\d+)\s*(?:samples?|specimens?)",
         r"(\d+)\s+samples?\s+(?:were|from|across|in|with)",
         r"(?:total\s+of\s+)?(\d{2,4})\s+samples?",
-        r"n\s*=\s*(\d+)\s+samples?",
+        r"(\d+)\s+GISTs?\b",
         r"(\d+)\s+(?:tumor|tumour)\s+(?:specimens?|biopsies|cases)",
-    ], pdf_text)
+    ], pdf_text_norm)
     n_patients = _find_int([
-        r"(\d+)\s+patients?",
+        r"(\d+)\s+treatment[- ]naive\s+patients?",              # "25 treatment-naive patients"
+        r"collected\s+\d+\s+samples?.*?from\s+(\d+)\s+patients?",  # "62 samples from 25 patients"
+        r"(\d+)\s+patients?\s+(?:diagnosed|enrolled|recruited|included|underwent)",
+        r"N\s*=\s*(\d+)\s*patients?",                          # N=25 patients
+        r"total\s+of\s+(\d+)\s+patients?",
+        r"cohort\s+of\s+(\d+)\s+patients?",
         r"(\d+)\s+(?:individuals?|subjects?|donors?)",
-        r"cohort\s+of\s+(\d+)",
         r"(\d+)\s+cases?\b",
-    ], pdf_text)
+        r"(\d+)\s+patients?",                                    # generic LAST
+    ], pdf_text_norm)
 
     # ── Sequencing types ──────────────────────────────────────────────────
     seq_types = []
@@ -476,6 +535,9 @@ def _extract_metadata_regex(pdf_text: str) -> dict:
         ("WTS",       [r"\bWTS\b", r"whole[- ]transcriptome\s+seq"]),
         ("RNA-seq",   [r"\bRNA-?seq\b"]),
         ("scRNA-seq", [r"\bscRNA-?seq\b", r"single[- ]cell\s+RNA"]),
+        ("snRNA-seq", [r"\bsnRNA-?seq\b", r"single[- ]nucleus\s+RNA"]),
+        ("scTCR-seq", [r"\bscTCR-?seq\b", r"single[- ]cell\s+TCR"]),
+        ("Spatial",   [r"\bspatial\s+transcriptom", r"\bVisium\b", r"\bSTAR-?map\b"]),
         ("ChIP-seq",  [r"\bChIP-?seq\b"]),
         ("ATAC-seq",  [r"\bATAC-?seq\b"]),
         ("targeted",  [r"targeted\s+(?:sequencing|panel|NGS)"]),
@@ -587,7 +649,7 @@ def _extract_metadata_llm(pdf_text: str, model: str, temperature: float) -> dict
     llm = load_chat_model(model)
     messages = [
         SystemMessage(content=SYSTEM_PROMPT_CURATOR),
-        HumanMessage(content=pdf_text[:8000]),
+        HumanMessage(content=pdf_text[:12000]),
     ]
     response = llm.invoke(messages)
     raw = response.content.strip()
@@ -610,6 +672,142 @@ def _extract_metadata_llm(pdf_text: str, model: str, temperature: float) -> dict
 # ─────────────────────────────────────────────────────────────
 # Per-format curation instructions
 # ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# Datatype suggestion engine
+# ─────────────────────────────────────────────────────────────
+
+# Column-name signals → (cbio_format, cbio_file, suggestion_text)
+_COLUMN_SIGNALS: list[tuple[list[str], str, str, str]] = [
+    # Clinical / survival
+    (["os_status","overall_survival","vital_status","survival_status","deceased"],
+     "CLINICAL_PATIENT", "data_clinical_patient.txt",
+     "Overall survival status column detected → add OS_STATUS + OS_MONTHS for Kaplan-Meier plots"),
+    (["os_months","overall_survival_months","os_time","survival_months","follow_up_months"],
+     "CLINICAL_PATIENT", "data_clinical_patient.txt",
+     "Survival time column detected → add OS_MONTHS (overall survival in months since diagnosis)"),
+    (["dfs_status","disease_free","recurrence_status","pfs_status","progression_free"],
+     "CLINICAL_PATIENT", "data_clinical_patient.txt",
+     "Disease-free / progression-free status detected → add DFS_STATUS + DFS_MONTHS"),
+    (["dfs_months","pfs_months","time_to_recurrence","time_to_progression"],
+     "CLINICAL_PATIENT", "data_clinical_patient.txt",
+     "Disease-free time column detected → add DFS_MONTHS"),
+    # Sample attributes
+    (["tumor_purity","purity","sample_purity","cancer_cell_fraction"],
+     "CLINICAL_SAMPLE", "data_clinical_sample.txt",
+     "Tumor purity column detected → add as TUMOR_PURITY (NUMBER, 0-1) in sample clinical file"),
+    (["tmb","tumor_mutational_burden","mutations_per_mb","mut_per_mb"],
+     "CLINICAL_SAMPLE", "data_clinical_sample.txt",
+     "TMB column detected → add as TMB_NONSYNONYMOUS (NUMBER) in sample clinical file"),
+    (["msi","microsatellite_instability","msi_status","msi_score"],
+     "CLINICAL_SAMPLE", "data_clinical_sample.txt",
+     "MSI column detected → add MSI_STATUS (STRING: MSI-H / MSS / MSI-L) in sample clinical file"),
+    (["ploidy","genome_ploidy","aneuploidy"],
+     "CLINICAL_SAMPLE", "data_clinical_sample.txt",
+     "Ploidy column detected → add as PLOIDY (NUMBER) in sample clinical file"),
+    # Mutations
+    (["hugo_symbol","gene_symbol","gene","hgnc_symbol"],
+     "MUTATION_MAF", "data_mutations.txt",
+     "Gene symbol column detected → this sheet may be convertible to MAF mutation format"),
+    (["variant_classification","mutation_type","variant_type","effect"],
+     "MUTATION_MAF", "data_mutations.txt",
+     "Variant classification column detected → maps to Variant_Classification in MAF format"),
+    (["ref_allele","reference_allele","ref","alt_allele","alt","tumor_seq_allele"],
+     "MUTATION_MAF", "data_mutations.txt",
+     "Allele columns detected → required for MAF: Reference_Allele + Tumor_Seq_Allele1/2"),
+    # CNA
+    (["copy_number","cn","copy_number_variation","cna","log2_cn","log2_ratio"],
+     "CONTINUOUS_CNA", "data_log2_cna.txt",
+     "Copy number column detected → convertible to continuous CNA (log2 ratio matrix, gene × sample)"),
+    (["gistic","gistic_score","thresholded_cna","discrete_cn","cnv_call"],
+     "DISCRETE_CNA", "data_cna.txt",
+     "Discrete CNA / GISTIC score detected → convertible to discrete CNA (-2/-1/0/1/2 matrix)"),
+    (["segment","seg_mean","seg.mean","chromosome_arm","arm_level"],
+     "SEGMENTED", "data_segments.txt",
+     "Segmentation data detected → convertible to CBS segmentation file (chr, start, end, num_markers, seg_mean)"),
+    # Structural variants / fusions
+    (["fusion","gene_fusion","fusion_gene","breakpoint","structural_variant","sv_type"],
+     "STRUCTURAL_VARIANT", "data_sv.txt",
+     "Fusion / structural variant column detected → convertible to data_sv.txt (Site1_Hugo_Symbol, Site2_Hugo_Symbol, etc.)"),
+    (["fusion_transcript","rna_fusion","fusion_cdna","reading_frame"],
+     "STRUCTURAL_VARIANT", "data_sv.txt",
+     "RNA fusion transcript column detected → add to data_sv.txt; include reading frame status"),
+    # Expression
+    (["rpkm","fpkm","tpm","normalized_counts","log2_expression","expression","read_count","counts"],
+     "EXPRESSION", "data_mrna_seq_rpkm.txt",
+     "Expression values detected → convertible to mRNA expression matrix (gene × sample, log2 RPKM/TPM)"),
+    (["zscore","z_score","normalized_expression"],
+     "EXPRESSION", "data_mrna_seq_v2_rsem_zscores.txt",
+     "Z-score expression detected → add as separate z-scores profile (data_mrna_seq_v2_rsem_zscores.txt)"),
+    # Methylation
+    (["beta_value","methylation","cpg","cg","methylation_level","m_value"],
+     "METHYLATION", "data_methylation.txt",
+     "Methylation beta values detected → convertible to methylation profile (gene × sample, 0-1 beta values)"),
+    # MutSig / GISTIC summary
+    (["q_value","q.value","fdr","benjamini","p_adj"],
+     "MUTSIG", "data_mutsig.txt",
+     "Q-value / FDR column detected → if paired with gene + p-value, convertible to MutSig gene significance file"),
+    (["amp_threshold","del_threshold","residual_q","gistic_amp","gistic_del"],
+     "GISTIC", "data_gistic.txt",
+     "GISTIC output columns detected → convertible to GISTIC broad/focal results file"),
+    # Generic assay
+    (["immune_score","cibersort","estimate","tumor_microenvironment","tme"],
+     "GENERIC_ASSAY", "data_generic_assay_immune_score.txt",
+     "Immune deconvolution scores detected → add as Generic Assay: IMMUNE_SCORE"),
+    (["signature","sig_","cosmic","mutational_signature","sbs"],
+     "GENERIC_ASSAY", "data_generic_assay_mutational_signature.txt",
+     "Mutational signature exposures detected → add as Generic Assay: MUTATIONAL_SIGNATURE"),
+    (["drug_response","ic50","auc","drug_sensitivity","compound"],
+     "GENERIC_ASSAY", "data_generic_assay_drug_treatment.txt",
+     "Drug response / IC50 data detected → add as Generic Assay: DRUG_TREATMENT"),
+    (["protein_expression","protein_level","rppa","proteomics","phosphoprotein"],
+     "GENERIC_ASSAY", "data_generic_assay_protein_expression.txt",
+     "Protein / RPPA expression detected → add as Generic Assay: PROTEIN_EXPRESSION"),
+]
+
+
+def _suggest_datatype(df: pd.DataFrame, current_fmt: str) -> list[dict]:
+    """
+    Inspect column names in a DataFrame and suggest cBioPortal data types
+    that the data could be added as.
+
+    Returns a list of suggestion dicts:
+        { "cbio_format", "cbio_file", "suggestion", "matched_columns" }
+
+    Filters out the format the sheet is already classified as.
+    """
+    if df.empty:
+        return []
+
+    # Collect all column tokens from header rows (rows 0-2)
+    raw_tokens: list[str] = []
+    for _, row in df.head(3).iterrows():
+        for val in row:
+            if pd.notna(val):
+                raw_tokens.append(str(val).lower().strip().replace(" ", "_").replace("-", "_"))
+
+    seen_formats: set[str] = set()
+    suggestions: list[dict] = []
+
+    for signal_cols, cbio_fmt, cbio_file, suggestion_text in _COLUMN_SIGNALS:
+        if cbio_fmt == current_fmt:
+            continue  # skip what it already is
+        if cbio_fmt in seen_formats:
+            continue  # one suggestion per format
+
+        matched = [sig for sig in signal_cols
+                   if any(sig in tok or tok in sig for tok in raw_tokens)]
+        if matched:
+            seen_formats.add(cbio_fmt)
+            suggestions.append({
+                "cbio_format":     cbio_fmt,
+                "cbio_file":       cbio_file,
+                "suggestion":      suggestion_text,
+                "matched_columns": matched[:3],   # show up to 3 triggering columns
+            })
+
+    return suggestions
 
 def _build_instructions(cr: ClassificationResult, df: pd.DataFrame, sheet_name: str) -> dict:
     """Return structured curation instructions for a classified sheet."""
@@ -636,6 +834,7 @@ def _build_instructions(cr: ClassificationResult, df: pd.DataFrame, sheet_name: 
         "transformations":     [],
         "missing_required":    [],
         "notes":               [cr.notes] if cr.notes else [],
+        "datatype_suggestions": _suggest_datatype(df, fmt),
     }
 
     # ── CLINICAL_PATIENT ──────────────────────────────────────
@@ -1113,7 +1312,7 @@ def _build_report(
     W4 = [Emu(1778000), Emu(1778000), Emu(2387600)]
     W5 = [Emu(1524000), Emu(1524000), Emu(2895600)]
     W6 = [Emu(1524000), Emu(1270000), Emu(3149600)]
-    W7 = [Emu(1270000), Emu(1905000), Emu(2768600)]
+    W7 = [Emu(1270000), Emu(1905000), Emu(952500), Emu(1816100)]
     W8 = [Emu(2286000), Emu(3657600)]
     W9 = [Emu(317500),  Emu(2857500), Emu(762000), Emu(2006600)]
 
@@ -1447,13 +1646,17 @@ def _build_report(
     # ──────────────────────────────────────────────────────────────────────
     # §2  STUDY METADATA
     # ──────────────────────────────────────────────────────────────────────
-    _h1("2. Proposed cBioPortal Study Metadata (meta_study.txt)")   # P010
+    _h1("2. Proposed cBioPortal Study Metadata")   # P010
     _empty()   # P011
 
-    # TABLE 0 — meta_study.txt (9r x 2c)
-    desc_val = meta_desc or (description[:200] if description else "")
+    desc_val   = meta_desc or (description[:200] if description else "")
     study_name = (f"{cancer_full} ({author} et al., {year})" if author and year
                   else study_title)
+
+    # ── 2.1  meta_study.txt ───────────────────────────────────────────────
+    _h2("2.1  meta_study.txt")
+    _body("", "Core study descriptor file — required for every cBioPortal study.")
+    _empty()
     t0 = _newtable(2)
     _hdr_row(t0, ["Field", "Value"], W0)
     for i, (field, value) in enumerate([
@@ -1467,6 +1670,141 @@ def _build_report(
         ("add_global_case_list",    "true"),
     ]):
         _dat_row(t0, [field, str(value)], W0, row_idx=i)
+    _empty()
+
+    # ── 2.2  meta_cancer_type.txt ─────────────────────────────────────────
+    _h2("2.2  meta_cancer_type.txt")
+    _body("", "Required if the cancer type is not already in the OncoTree. "
+              "If your cancer type is a standard OncoTree node, this file may be omitted.")
+    _empty()
+    t_ct = _newtable(2)
+    _hdr_row(t_ct, ["Field", "Value"], W0)
+    for i, (field, value) in enumerate([
+        ("type_of_cancer",   cancer_t),
+        ("name",             cancer_full),
+        ("color",            "LightYellow"),
+        ("parent_type_of_cancer", "tissue"),
+        ("dedicated_color",  "LightYellow"),
+        ("short_name",       cancer_t.upper()),
+    ]):
+        _dat_row(t_ct, [field, str(value)], W0, row_idx=i)
+    _empty()
+
+    # ── 2.3  Per-datatype meta_*.txt files ────────────────────────────────
+    _h2("2.3  Per-datatype meta_*.txt files")
+    _body("", "Each data file requires a paired meta file. "
+              "The following meta files should be created based on available supplementary data:")
+    _empty()
+
+    # Build per-datatype meta file specs
+    _meta_specs: list[tuple] = []   # (meta_filename, datafile, profile_name, profile_desc, extra_fields)
+
+    if clin_pat:
+        _meta_specs.append((
+            "meta_clinical_patient.txt",
+            "data_clinical_patient.txt",
+            "Patient Clinical Data",
+            f"Patient-level clinical attributes for {study_id}",
+            [("datatype", "PATIENT_ATTRIBUTES"), ("data_filename", "data_clinical_patient.txt")]
+        ))
+    if clin_sam:
+        _meta_specs.append((
+            "meta_clinical_sample.txt",
+            "data_clinical_sample.txt",
+            "Sample Clinical Data",
+            f"Sample-level clinical attributes for {study_id}",
+            [("datatype", "SAMPLE_ATTRIBUTES"), ("data_filename", "data_clinical_sample.txt")]
+        ))
+    if maf_recs:
+        _meta_specs.append((
+            "meta_mutations.txt",
+            "data_mutations.txt",
+            "Mutations",
+            f"Somatic mutation data for {study_id} ({', '.join(str(s) for s in seq_types) or 'WES/WGS'})",
+            [("datatype", "MAF"), ("stable_id", f"{study_id}_mutations"),
+             ("show_profile_in_analysis_tab", "true"), ("data_filename", "data_mutations.txt")]
+        ))
+    if _recs("DISCRETE_CNA", "GISTIC"):
+        _meta_specs.append((
+            "meta_cna.txt",
+            "data_cna.txt",
+            "Putative Copy-Number Alterations from GISTIC",
+            f"Discrete copy-number data for {study_id}",
+            [("datatype", "DISCRETE"), ("stable_id", f"{study_id}_gistic"),
+             ("show_profile_in_analysis_tab", "true"), ("data_filename", "data_cna.txt")]
+        ))
+    if _recs("CONTINUOUS_CNA"):
+        _meta_specs.append((
+            "meta_log2_cna.txt",
+            "data_log2_cna.txt",
+            "Log2 Copy-Number Values",
+            f"Continuous (log2) copy-number data for {study_id}",
+            [("datatype", "CONTINUOUS"), ("stable_id", f"{study_id}_log2CNA"),
+             ("show_profile_in_analysis_tab", "false"), ("data_filename", "data_log2_cna.txt")]
+        ))
+    if _recs("SEGMENTED"):
+        _meta_specs.append((
+            "meta_segments.txt",
+            "data_segments.txt",
+            "Segmented Data",
+            f"CBS segmentation data for {study_id}",
+            [("datatype", "SEG"), ("stable_id", f"{study_id}_segment"),
+             ("reference_genome_id", ref_genome), ("data_filename", "data_segments.txt")]
+        ))
+    if sv_recs or fus_recs:
+        _meta_specs.append((
+            "meta_sv.txt",
+            "data_sv.txt",
+            "Structural Variants",
+            f"Structural variant and fusion data for {study_id}",
+            [("datatype", "SV"), ("stable_id", f"{study_id}_structural_variants"),
+             ("show_profile_in_analysis_tab", "true"), ("data_filename", "data_sv.txt")]
+        ))
+    if _recs("EXPRESSION", "MRNA"):
+        _meta_specs.append((
+            "meta_mrna_seq_rpkm.txt",
+            "data_mrna_seq_rpkm.txt",
+            "mRNA Expression (RNA Seq RPKM)",
+            f"mRNA expression data (RNA-seq RPKM) for {study_id}",
+            [("datatype", "CONTINUOUS"), ("stable_id", f"{study_id}_rna_seq_mrna"),
+             ("show_profile_in_analysis_tab", "false"), ("data_filename", "data_mrna_seq_rpkm.txt")]
+        ))
+    if _recs("METHYLATION"):
+        _meta_specs.append((
+            "meta_methylation.txt",
+            "data_methylation.txt",
+            "Methylation (HM450)",
+            f"DNA methylation (beta values) for {study_id}",
+            [("datatype", "CONTINUOUS"), ("stable_id", f"{study_id}_methylation_hm450"),
+             ("show_profile_in_analysis_tab", "false"), ("data_filename", "data_methylation.txt")]
+        ))
+    if ms_recs:
+        _meta_specs.append((
+            "meta_mutsig.txt",
+            "data_mutsig.txt",
+            "MutSig",
+            f"Significantly mutated genes (MutSig) for {study_id}",
+            [("datatype", "MUTSIG"), ("stable_id", f"{study_id}_mutsig"),
+             ("data_filename", "data_mutsig.txt")]
+        ))
+    if _recs("GISTIC") and not _recs("DISCRETE_CNA"):
+        _meta_specs.append((
+            "meta_gistic.txt",
+            "data_gistic.txt",
+            "GISTIC",
+            f"GISTIC-called focal amplifications/deletions for {study_id}",
+            [("datatype", "GISTIC_GENES_AMP"), ("stable_id", f"{study_id}_gistic_amp"),
+             ("data_filename", "data_gistic.txt")]
+        ))
+
+    if _meta_specs:
+        t_meta = _newtable(3)
+        _hdr_row(t_meta, ["Meta File", "Data File", "Key Fields"], [2800, 2800, 3760])
+        for i, (mf, df_name, pname, pdesc, extras) in enumerate(_meta_specs):
+            extra_txt = "  |  ".join(f"{k}: {v}" for k, v in extras[:3])
+            _dat_row(t_meta, [mf, df_name, extra_txt], [2800, 2800, 3760], row_idx=i)
+    else:
+        _body("", "No curateable data types detected — no additional meta files required.")
 
     _empty()   # P012
 
@@ -1492,8 +1830,11 @@ def _build_report(
         fmt     = str(rec.get("cbio_target_file", ""))
         notes   = rec.get("notes") or rec.get("transformations") or []
         missing = rec.get("missing_required") or []
+        suggestions = rec.get("datatype_suggestions") or []
         note_txt = (str(notes[0])[:70] if notes
-                    else ("⚠ " + str(missing[0])[:65]) if missing else "")
+                    else ("⚠ " + str(missing[0])[:65]) if missing
+                    else ("💡 " + suggestions[0]["suggestion"][:60]) if suggestions
+                    else "")
         _dat_row(t1,
                  [rec.get("file",""), content, fmt, cur, note_txt],
                  W1, row_idx=i, status_col=3)
@@ -1814,43 +2155,145 @@ def _build_report(
     # ──────────────────────────────────────────────────────────────────────
     _h1("5. Case Lists")   # P066
 
-    _body("", "cBioPortal requires case lists to define which samples have each data type. "
-              "Based on the study, the following case lists should be created:")   # P067
-    _empty()   # P068
+    _body("", "cBioPortal requires a case_lists/ folder containing one file per data type "
+              "that lists the sample IDs included in that profile. "
+              "Based on detected data types, the following case list files should be created:")
+    _empty()
 
-    # TABLE 7 — case lists (N x 3c)
+    # ── Detect available data types ───────────────────────────────────────
     has_wes  = any("WES" in str(s).upper() for s in seq_types)
     has_wgs  = any("WGS" in str(s).upper() for s in seq_types)
     has_rna  = any(k in str(s).upper() for s in seq_types
-                   for k in ("WTS","RNA","MRNA","RNA-SEQ"))
+                   for k in ("WTS", "RNA", "MRNA", "RNA-SEQ"))
     has_maf  = bool(maf_recs)
     has_sv   = bool(sv_recs or fus_recs)
     has_cna  = bool(cna_recs)
-    has_expr = bool(_recs("EXPRESSION","MRNA"))
+    has_expr = bool(_recs("EXPRESSION", "MRNA"))
+    has_meth = bool(_recs("METHYLATION"))
+
+    # Placeholder sample ID block — curator fills in real IDs
+    _sample_placeholder = (
+        f"<replace with tab-separated {n_samples} SAMPLE_IDs from data_clinical_sample.txt>"
+    )
+
+    # ── 5.1  Summary table ────────────────────────────────────────────────
+    _h2("5.1  Case List Summary")
+    _empty()
 
     cl_rows: list[tuple] = [
-        ("cases_all.txt", f"{study_id}_all",
-         f"All {n_samples} samples in the study"),
+        ("cases_all.txt",
+         f"{study_id}_all",
+         "All",
+         f"All {n_samples} samples in the study — always required",
+         True),
     ]
     if has_maf or has_wes or has_wgs:
-        cl_rows.append(("cases_sequenced.txt", f"{study_id}_sequenced",
-                         "Samples with WES or WGS mutation data"))
+        cl_rows.append((
+            "cases_sequenced.txt",
+            f"{study_id}_sequenced",
+            "Sequenced",
+            "Samples with WES or WGS somatic mutation data",
+            True))
     if has_cna or has_wes or has_wgs:
-        cl_rows.append(("cases_cna.txt", f"{study_id}_cna",
-                         "Samples with CNV calls (same as sequenced cohort)"))
+        cl_rows.append((
+            "cases_cna.txt",
+            f"{study_id}_cna",
+            "CNA",
+            "Samples with copy-number alteration calls (typically same as sequenced)",
+            True))
     if has_sv:
-        cl_rows.append(("cases_sv.txt", f"{study_id}_sv",
-                         "Samples with structural variant and/or fusion data"))
+        cl_rows.append((
+            "cases_sv.txt",
+            f"{study_id}_sv",
+            "SV",
+            "Samples with structural variant and/or RNA fusion data",
+            True))
     if has_rna or has_expr:
-        cl_rows.append(("cases_rna_seq_mrna.txt", f"{study_id}_rna_seq",
-                         "Samples with RNA-seq / WTS expression data"))
+        cl_rows.append((
+            "cases_rna_seq_mrna.txt",
+            f"{study_id}_rna_seq_mrna",
+            "RNA-seq",
+            "Samples with RNA-seq / WTS expression data",
+            True))
+    if has_meth:
+        cl_rows.append((
+            "cases_methylation.txt",
+            f"{study_id}_methylation",
+            "Methylation",
+            "Samples with DNA methylation data",
+            True))
 
-    t7 = _newtable(3)
-    _hdr_row(t7, ["Case List File", "Stable ID", "Samples to Include"], W7)
-    for i, (fname, sid, desc) in enumerate(cl_rows):
-        _dat_row(t7, [fname, sid, desc], W7, row_idx=i)
+    t7 = _newtable(4)
+    _hdr_row(t7, ["Case List File", "Stable ID", "Profile", "Samples to Include"], W7)
+    for i, (fname, sid, profile, desc, _) in enumerate(cl_rows):
+        _dat_row(t7, [fname, sid, profile, desc], W7, row_idx=i)
+    _empty()
+
+    # ── 5.2  Case list file content templates ────────────────────────────
+    _h2("5.2  Case List File Content Templates")
+    _body("", "Create a case_lists/ subfolder in the study directory. "
+              "Each file below follows the format: field: value (one per line), "
+              "then case_list_ids on the last line with tab-separated SAMPLE_IDs.")
+    _empty()
+
+    # Build content templates for each case list
+    _cl_templates: list[tuple[str, str]] = []
+
+    for fname, sid, profile, desc, _ in cl_rows:
+        _content_lines = [
+            f"cancer_study_identifier: {study_id}",
+            f"stable_id: {sid}",
+            f"case_list_name: {profile}",
+            f"case_list_description: {desc}",
+            f"case_list_ids: {_sample_placeholder}",
+        ]
+        _cl_templates.append((fname, "\n".join(_content_lines)))
+
+    for fname, content in _cl_templates:
+        _h3(fname)
+        _body("", content)
+        _empty()
 
     _empty()   # P069
+
+    # ──────────────────────────────────────────────────────────────────────
+    # §5b  SUGGESTED ADDITIONAL DATA TYPES
+    # ──────────────────────────────────────────────────────────────────────
+    # Collect all suggestions across all records, deduplicated by cbio_format
+    _seen_sugg: set[str] = set()
+    _all_suggestions: list[tuple[str, str, str, str, str]] = []  # (file, sheet, cbio_file, suggestion, matched)
+    for _rec in records:
+        for _s in (_rec.get("datatype_suggestions") or []):
+            _key = _s["cbio_format"] + "|" + _rec.get("file", "")
+            if _key not in _seen_sugg:
+                _seen_sugg.add(_key)
+                _all_suggestions.append((
+                    _rec.get("file", ""),
+                    _rec.get("sheet", ""),
+                    _s["cbio_file"],
+                    _s["suggestion"],
+                    ", ".join(_s.get("matched_columns", [])),
+                ))
+
+    if _all_suggestions:
+        _h1("5b. Suggested Additional Data Types")
+        _body("", (
+            "The following data types were detected in the supplementary files based on column content. "
+            "These are not yet classified as primary cBioPortal files but could be added as additional "
+            "profiles with transformation:"
+        ))
+        _empty()
+
+        # Table: File | Detected column(s) | Suggested cBioPortal file | Suggestion
+        _W_SUGG = [1800, 1800, 2000, 3760]
+        _t_sugg = _newtable(4)
+        _hdr_row(_t_sugg, ["Source File", "Detected Column(s)", "Suggested cBioPortal File", "Action"], _W_SUGG)
+        for _i, (_file, _sheet, _cbio_file, _sugg, _matched) in enumerate(_all_suggestions):
+            _src_label = f"{_file}" + (f" / {_sheet}" if _sheet and _sheet != "Sheet1" else "")
+            _dat_row(_t_sugg,
+                     [_src_label, _matched, _cbio_file, _sugg],
+                     _W_SUGG, row_idx=_i)
+        _empty()
 
     # ──────────────────────────────────────────────────────────────────────
     # §6  DATA GAPS
