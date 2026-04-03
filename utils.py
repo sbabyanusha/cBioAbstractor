@@ -1,8 +1,15 @@
 # Implement utility functions here
 
-from langchain.chat_models import init_chat_model
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+try:
+    from langchain.chat_models import init_chat_model
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import BaseMessage
+    _LANGCHAIN_AVAILABLE = True
+except ImportError:
+    _LANGCHAIN_AVAILABLE = False
+    init_chat_model = None
+    BaseChatModel = object
+    BaseMessage = object
 
 # from django.conf import settings
 import os
@@ -19,12 +26,13 @@ def get_message_text(msg: BaseMessage) -> str:
         return "".join(txts).strip()
 
 
-def load_chat_model(fully_specified_name: str) -> BaseChatModel:
-    """Load a chat model from a fully specified name.
-
-    Args:
-        fully_specified_name (str): String in the format 'provider/model'.
-    """
+def load_chat_model(fully_specified_name: str):
+    """Load a chat model. Requires langchain to be installed."""
+    if not _LANGCHAIN_AVAILABLE:
+        raise ImportError(
+            "langchain is not installed. This function is not used by the "
+            "Streamlit app (which calls the Anthropic SDK directly)."
+        )
     provider, model = fully_specified_name.split("/", maxsplit=1)
 
     # AWS - claude-3-5-sonnet-20240620-v1:0
