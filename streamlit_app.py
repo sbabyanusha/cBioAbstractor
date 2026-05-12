@@ -1,61 +1,34 @@
 """
 cBioAbstractor — Streamlit Application
-Self-contained: no backend server required.
+Self-contained Streamlit app for cBioPortal curation support.
+
+This cleaned version keeps only:
+  1. Curation Report
+  2. File Classification
+
+It removes merge-conflict markers, Docker/backend assumptions, and api_config.py usage.
+Set ANTHROPIC_API_KEY as an environment variable or Streamlit secret.
 """
 
 from __future__ import annotations
 
-import io
+import json
 import os
-<<<<<<< HEAD
-import sys
-import json
-import tempfile
-import traceback
-import importlib
-
-import streamlit as st
-
-=======
 import re
-import sys
-import json
-import time
 import shutil
+import sys
 import tempfile
+import time
 import traceback
-import importlib
-import importlib.util
-import logging
-from pathlib import Path
-from typing import Optional
+from typing import Any
 
+import pandas as pd
 import streamlit as st
 
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
-
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 # ── Path setup ────────────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-
-# ── Dependency check ──────────────────────────────────────────────────────────
-_REQUIRED = {
-    "pandas":    "pandas",
-    "PyPDF2":    "PyPDF2",
-    "docx":      "python-docx",
-    "anthropic": "anthropic",
-    "chardet":   "chardet",
-    "requests":  "requests",
-    "plotly":    "plotly",
-    "openpyxl":  "openpyxl",
-}
-_missing = [pkg for mod, pkg in _REQUIRED.items()
-            if not importlib.util.find_spec(mod)]
-
-import pandas as pd
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -70,353 +43,243 @@ st.set_page_config(
 # API key loading
 # Resolution order:
 #   1. ANTHROPIC_API_KEY environment variable
-#   2. api_config.py in the same folder
-#   3. .env file in the same folder
+#   2. Streamlit secrets
+#   3. Sidebar input
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_api_key() -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if key:
         return key
 
-    cfg_path = os.path.join(_HERE, "api_config.py")
-    if os.path.exists(cfg_path):
-        try:
-            ns: dict = {}
-            exec(open(cfg_path).read(), ns)
-            key = ns.get("ANTHROPIC_API_KEY", "")
-            if key:
-                os.environ["ANTHROPIC_API_KEY"] = key
-                return key
-        except Exception:
-            pass
-
-    env_path = os.path.join(_HERE, ".env")
-    if os.path.exists(env_path):
-        try:
-            for line in open(env_path):
-                line = line.strip()
-                if line.startswith("ANTHROPIC_API_KEY"):
-                    _, _, val = line.partition("=")
-                    key = val.strip().strip('"').strip("'")
-                    if key:
-                        os.environ["ANTHROPIC_API_KEY"] = key
-                        return key
-        except Exception:
-            pass
-
-    return ""
-
-_API_KEY = _load_api_key()
-
-<<<<<<< HEAD
-=======
-# ── Runtime key override (for shared/cloud deployments) ───────────────────────
-if not _API_KEY:
     try:
-        _API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
-        if _API_KEY:
-            os.environ["ANTHROPIC_API_KEY"] = _API_KEY
+        key = st.secrets.get("ANTHROPIC_API_KEY", "").strip()
+        if key:
+            os.environ["ANTHROPIC_API_KEY"] = key
+            return key
     except Exception:
         pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper functions — defined BEFORE sidebar so they can be called there
-# ─────────────────────────────────────────────────────────────────────────────
+    return ""
+
+
+_API_KEY = _load_api_key()
+
+
 def _get_api_key() -> str:
-    return _API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    return (_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
+
 
 def _require_api_key() -> bool:
     if not _get_api_key():
-        st.error("⬅️ Enter your Anthropic API key in the sidebar to continue.")
+        st.error("Please add your Anthropic API key in the sidebar or set ANTHROPIC_API_KEY.")
         return False
     return True
 
-def _save_upload_to_tmp(uploaded) -> tuple[str, str]:
-    original_name = uploaded.name
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _save_upload_to_tmp(uploaded_file, filename: str | None = None) -> str:
     tmp_dir = tempfile.mkdtemp()
-    path = os.path.join(tmp_dir, original_name)
-    with open(path, "wb") as f:
-        f.write(uploaded.getvalue())
-    return path, original_name
+    safe_name = filename or uploaded_file.name
+    path = os.path.join(tmp_dir, safe_name)
+    with open(path, "wb") as handle:
+        handle.write(uploaded_file.getvalue())
+    return path
+
 
 def _safe_cleanup(*paths: str) -> None:
-    for p in paths:
+    for path in paths:
+        if not path:
+            continue
         try:
-            shutil.rmtree(os.path.dirname(p), ignore_errors=True)
+            shutil.rmtree(os.path.dirname(path), ignore_errors=True)
         except Exception:
             pass
 
-def _call_anthropic_with_retry(client, model, system, user_content,
-                                max_tokens=2000, retries=3, backoff=5.0):
+
+def _call_anthropic_with_retry(
+    client,
+    model: str,
+    system: str,
+    user_content: str,
+    max_tokens: int = 2000,
+    retries: int = 3,
+    backoff: float = 5.0,
+) -> str:
     import anthropic
-    last_exc = None
+
+    last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = client.messages.create(
-                model=model, max_tokens=max_tokens, system=system,
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
                 messages=[{"role": "user", "content": user_content}],
             )
-            return resp.content[0].text
-        except anthropic.RateLimitError as e:
-            time.sleep(backoff * (attempt + 1)); last_exc = e
-        except anthropic.APIStatusError as e:
-            if e.status_code >= 500:
-                time.sleep(backoff * (attempt + 1)); last_exc = e
+            return response.content[0].text
+        except anthropic.RateLimitError as exc:
+            last_error = exc
+            time.sleep(backoff * (attempt + 1))
+        except anthropic.APIStatusError as exc:
+            if exc.status_code >= 500:
+                last_error = exc
+                time.sleep(backoff * (attempt + 1))
             else:
                 raise
-        except anthropic.APIConnectionError as e:
-            time.sleep(backoff * (attempt + 1)); last_exc = e
-    raise last_exc or RuntimeError("API call failed after retries")
+        except anthropic.APIConnectionError as exc:
+            last_error = exc
+            time.sleep(backoff * (attempt + 1))
 
-def _parse_llm_json(raw: str) -> dict:
-    raw = re.sub(r"^```[^\n]*\n?", "", raw.strip(), flags=re.MULTILINE)
-    raw = re.sub(r"```$", "", raw, flags=re.MULTILINE).strip()
-    return json.loads(raw)
+    raise last_error or RuntimeError("Anthropic API call failed after retries.")
+
+
+def _parse_llm_json(raw: str) -> dict[str, Any]:
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```[^\n]*\n?", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"```$", "", cleaned, flags=re.MULTILINE).strip()
+    return json.loads(cleaned)
+
 
 def _looks_tmp(name: str) -> bool:
-    return bool(re.match(r'^tmp[a-z0-9_]{4,}', os.path.splitext(name)[0], re.I))
-
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
-# ─────────────────────────────────────────────────────────────────────────────
-# Sidebar
-# ─────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.title("cBioAbstractor")
-    st.caption("Automated curation support for cancer genomics studies.")
-    st.divider()
-
-    if _missing:
-<<<<<<< HEAD
-        st.error("Missing packages. Run:")
-        st.code("pip install " + " ".join(_missing))
-
-    if _API_KEY:
-        st.success("Connected")
-    else:
-        st.error(
-            "API key not found. Create an **api_config.py** file:\n"
-            "```python\nANTHROPIC_API_KEY = \"sk-ant-...\"\n```"
-        )
-
-    st.divider()
-    st.caption("Version 1.0")
-=======
-        st.warning("Some packages are installing. Please refresh in 1–2 minutes.")
-
-    if _get_api_key():
-        st.success("Connected")
-    else:
-        st.warning("API key not configured. Contact your administrator.")
-
-    st.divider()
-    st.caption("Version 1.1")
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Header
-# ─────────────────────────────────────────────────────────────────────────────
-st.title("cBioAbstractor")
-st.markdown(
-    "Upload a published cancer genomics paper and its supplementary data files "
-    "to generate a structured curation summary for cBioPortal ingestion."
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Tabs
-# ─────────────────────────────────────────────────────────────────────────────
-<<<<<<< HEAD
-tab_curate, tab_detect, tab_transform, tab_examples = st.tabs([
-    "Curation Report",
-    "File Classification",
-    "Format Converter",
-    "Training Examples",
-=======
-tab_curate, tab_detect = st.tabs([
-    "Curation Report",
-    "File Classification",
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
-])
+    return bool(re.match(r"^tmp[a-z0-9_]{4,}", os.path.splitext(name)[0], re.I))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-<<<<<<< HEAD
-# Shared helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def _get_api_key() -> str:
-    return _API_KEY
-
-def _require_api_key() -> bool:
-    if not _API_KEY:
-        st.error(
-            "API key not configured. Add your Anthropic key to **api_config.py**."
-        )
-        return False
-    return True
-
-def _save_upload_to_tmp(uploaded) -> tuple[str, str]:
-    """Save an UploadedFile to a temp directory.
-    Returns (temp_path, original_name) where original_name is always the
-    browser-supplied filename from the file picker dialog.
-    """
-    # Streamlit's .name is the original filename as selected by the user
-    original_name = uploaded.name
-    tmp_dir = tempfile.mkdtemp()
-    # Save using the original name so Path(path).name == original_name
-    path = os.path.join(tmp_dir, original_name)
-    with open(path, "wb") as f:
-        f.write(uploaded.getvalue())
-    return path, original_name
-
-def _colour_curability(val):
+def _colour_curability(value: str) -> str:
     return {
-        "Yes":                      "background-color:#E2EFDA;color:#375623",
-        "Partly curatable":           "background-color:#FFF2CC;color:#7F6000",
+        "Yes": "background-color:#E2EFDA;color:#375623",
+        "Partly curatable": "background-color:#FFF2CC;color:#7F6000",
         "Needs manual intervention": "background-color:#FCE4D6;color:#843C0C",
-    }.get(val, "")
+    }.get(value, "")
 
-def _colour_priority(val):
+
+def _colour_priority(value: str) -> str:
     return {
-        "HIGH":   "background-color:#FCE4D6;color:#843C0C",
+        "HIGH": "background-color:#FCE4D6;color:#843C0C",
         "MEDIUM": "background-color:#FFF2CC;color:#7F6000",
-        "LOW":    "background-color:#E2EFDA;color:#375623",
-        "N/A":    "background-color:#F2F2F2;color:#595959",
-    }.get(val, "")
+        "LOW": "background-color:#E2EFDA;color:#375623",
+        "N/A": "background-color:#F2F2F2;color:#595959",
+    }.get(value, "")
 
-=======
-# Colour helpers for the report table
-# ─────────────────────────────────────────────────────────────────────────────
 
-def _colour_curability(val):
-    return {
-        "Yes":                      "background-color:#E2EFDA;color:#375623",
-        "Partly curatable":           "background-color:#FFF2CC;color:#7F6000",
-        "Needs manual intervention": "background-color:#FCE4D6;color:#843C0C",
-    }.get(val, "")
-
-def _colour_priority(val):
-    return {
-        "HIGH":   "background-color:#FCE4D6;color:#843C0C",
-        "MEDIUM": "background-color:#FFF2CC;color:#7F6000",
-        "LOW":    "background-color:#E2EFDA;color:#375623",
-        "N/A":    "background-color:#F2F2F2;color:#595959",
-    }.get(val, "")
-
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
-def _colour_confidence(val):
+def _colour_confidence(value: str) -> str:
     try:
-        v = float(str(val).replace("%", ""))
-        if v >= 70: return "background-color:#E2EFDA;color:#375623"
-        if v >= 40: return "background-color:#FFF2CC;color:#7F6000"
+        numeric = float(str(value).replace("%", ""))
+        if numeric >= 70:
+            return "background-color:#E2EFDA;color:#375623"
+        if numeric >= 40:
+            return "background-color:#FFF2CC;color:#7F6000"
         return "background-color:#FCE4D6;color:#843C0C"
     except Exception:
         return ""
 
-def _render_inline_report(meta: dict, records: list, summary: dict):
-    """Render the full curation report as inline Streamlit content."""
 
-    def _curability_label(val: str) -> str:
-        return {
-            "YES":     "Yes",
-            "PARTIAL": "Partly curatable",
-            "NO":      "Needs manual intervention",
-        }.get(val, val)
+def _curability_label(value: str) -> str:
+    return {
+        "YES": "Yes",
+        "PARTIAL": "Partly curatable",
+        "NO": "Needs manual intervention",
+    }.get(value, value or "—")
 
-    # ── Study overview ────────────────────────────────────────────────────────
+
+def _format_label(value: str) -> str:
+    return {
+        "NOT_LOADABLE": "Needs manual intervention",
+        "Not directly loadable": "Needs manual intervention",
+    }.get(value, value or "—")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Report rendering
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_inline_report(meta: dict[str, Any], summary: dict[str, Any]) -> None:
     st.markdown("## Study Overview")
 
-    ov1, ov2, ov3, ov4 = st.columns(4)
-    ov1.metric("Study ID",        summary.get("study_id") or "—")
-    ov2.metric("Cancer Type",     summary.get("cancer_type") or "—")
-    ov3.metric("Samples",         summary.get("num_samples") or "—")
-    ov4.metric("Reference Genome", summary.get("reference_genome") or "—")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Study ID", summary.get("study_id") or "—")
+    col2.metric("Cancer Type", summary.get("cancer_type") or "—")
+    col3.metric("Samples", summary.get("num_samples") or "—")
+    col4.metric("Reference Genome", summary.get("reference_genome") or "—")
 
-    if meta.get("study_title"):
-        st.markdown(f"**Title:** {meta['study_title']}")
-    if meta.get("cancer_type_full"):
-        st.markdown(f"**Cancer type (full):** {meta['cancer_type_full']}")
-    if meta.get("primary_site"):
-        st.markdown(f"**Primary site:** {meta['primary_site']}")
-    if meta.get("journal") or meta.get("year"):
-        st.markdown(
-            f"**Publication:** {meta.get('journal', '')} {meta.get('year', '')}".strip()
-        )
-    if meta.get("pmid"):
-        st.markdown(f"**PMID:** {meta['pmid']}")
-    if meta.get("doi"):
-        st.markdown(f"**DOI:** {meta['doi']}")
-    if meta.get("first_author_surname"):
-        st.markdown(f"**First author:** {meta['first_author_surname']}")
-    if meta.get("corresponding_authors"):
-        st.markdown(f"**Corresponding author(s):** {meta['corresponding_authors']}")
-    if meta.get("cohort_description"):
-        st.markdown(f"**Cohort:** {meta['cohort_description']}")
-    if meta.get("sequencing_types"):
-        seq = meta["sequencing_types"]
-        if isinstance(seq, list):
-            seq = ", ".join(seq)
-        st.markdown(f"**Sequencing:** {seq}")
-    if meta.get("data_repositories"):
-        repos = meta["data_repositories"]
-        if isinstance(repos, list):
-            repos = ", ".join(repos)
-        st.markdown(f"**Data repositories:** {repos}")
-    if meta.get("description"):
-        st.markdown(f"**Summary:** {meta['description']}")
-    if meta.get("key_findings"):
+    fields = [
+        ("Title", meta.get("study_title")),
+        ("Cancer type full", meta.get("cancer_type_full")),
+        ("Primary site", meta.get("primary_site")),
+        ("Publication", " ".join(str(x) for x in [meta.get("journal", ""), meta.get("year", "")] if x).strip()),
+        ("PMID", meta.get("pmid")),
+        ("DOI", meta.get("doi")),
+        ("First author", meta.get("first_author_surname")),
+        ("Corresponding author(s)", meta.get("corresponding_authors")),
+        ("Cohort", meta.get("cohort_description")),
+        ("Summary", meta.get("description")),
+    ]
+    for label, value in fields:
+        if value:
+            st.markdown(f"**{label}:** {value}")
+
+    sequencing_types = meta.get("sequencing_types")
+    if sequencing_types:
+        if isinstance(sequencing_types, list):
+            sequencing_types = ", ".join(str(x) for x in sequencing_types)
+        st.markdown(f"**Sequencing:** {sequencing_types}")
+
+    repositories = meta.get("data_repositories")
+    if repositories:
+        if isinstance(repositories, list):
+            repositories = ", ".join(str(x) for x in repositories)
+        st.markdown(f"**Data repositories:** {repositories}")
+
+    key_findings = meta.get("key_findings") or []
+    if key_findings:
         st.markdown("**Key findings:**")
-        for kf in meta["key_findings"]:
-            st.markdown(f"- {kf}")
+        for finding in key_findings:
+            st.markdown(f"- {finding}")
 
     st.divider()
-
-    # ── Supplementary file analysis ───────────────────────────────────────────
     st.markdown("## Supplementary File Analysis")
 
-    pr1, pr2, pr3 = st.columns(3)
-    pr1.metric("High Priority",   summary.get("high_priority", 0))
-    pr2.metric("Medium Priority", summary.get("medium_priority", 0))
-    pr3.metric("Needs Manual Intervention", summary.get("not_loadable", 0))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("High Priority", summary.get("high_priority", 0))
+    col2.metric("Medium Priority", summary.get("medium_priority", 0))
+    col3.metric("Needs Manual Intervention", summary.get("not_loadable", 0))
 
-    def _fmt_label(val: str) -> str:
-        """Clean up cBioPortal format labels for display."""
-        replacements = {
-            "Not directly loadable": "Needs manual intervention",
-            "NOT_LOADABLE":          "Needs manual intervention",
+    breakdown = summary.get("file_breakdown", []) or []
+    if not breakdown:
+        st.info("No supplementary file breakdown was generated.")
+        return
+
+    table = pd.DataFrame([
+        {
+            "File": row.get("file", "—"),
+            "Sheet": row.get("sheet", "—"),
+            "cBioPortal Format": _format_label(row.get("cbio_format", "—")),
+            "Confidence": f"{float(row.get('confidence', 0)):.0f}%",
+            "Loadable": _curability_label(row.get("curability", "—")),
+            "Priority": row.get("priority", "—"),
+            "Columns Present": ", ".join(row.get("req_present", [])) or "—",
+            "Columns Missing": ", ".join(row.get("req_missing", [])) or "None",
         }
-        return replacements.get(val, val)
+        for row in breakdown
+    ])
 
-    breakdown = summary.get("file_breakdown", [])
-    if breakdown:
-        df_bd = pd.DataFrame([{
-            "File":              row["file"],
-            "Sheet":             row["sheet"],
-            "cBioPortal Format": _fmt_label(row["cbio_format"]),
-            "Confidence":        f"{row.get('confidence', 0):.0f}%",
-            "Loadable":          _curability_label(row["curability"]),
-            "Priority":          row["priority"],
-            "Columns Present":   ", ".join(row.get("req_present", [])) or "—",
-            "Columns Missing":   ", ".join(row.get("req_missing", [])) or "None",
-        } for row in breakdown])
-
-        styled = (
-            df_bd.style
-            .map(_colour_curability, subset=["Loadable"])
-            .map(_colour_priority,   subset=["Priority"])
-            .map(_colour_confidence, subset=["Confidence"])
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+    styled = (
+        table.style
+        .map(_colour_curability, subset=["Loadable"])
+        .map(_colour_priority, subset=["Priority"])
+        .map(_colour_confidence, subset=["Confidence"])
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
     st.divider()
-
-    # ── Per-sheet detail ──────────────────────────────────────────────────────
     st.markdown("## Per-Sheet Classification Detail")
     for row in breakdown:
-        label = "{} — {}".format(row["file"], row["sheet"])
+        label = f"{row.get('file', '—')} — {row.get('sheet', '—')}"
         with st.expander(label, expanded=False):
             c1, c2, c3 = st.columns(3)
-            c1.markdown(f"**Format:** {_fmt_label(row['cbio_format'])}")
-            c2.markdown(f"**Confidence:** {row.get('confidence', 0):.0f}%")
-            c3.markdown(f"**Priority:** {row['priority']}")
+            c1.markdown(f"**Format:** {_format_label(row.get('cbio_format', '—'))}")
+            c2.markdown(f"**Confidence:** {float(row.get('confidence', 0)):.0f}%")
+            c3.markdown(f"**Priority:** {row.get('priority', '—')}")
 
             if row.get("verdict"):
                 st.markdown(f"**Assessment:** {row['verdict']}")
@@ -428,52 +291,59 @@ def _render_inline_report(meta: dict, records: list, summary: dict):
                 st.info("Optional columns found: " + ", ".join(row["opt_present"]))
 
     st.divider()
-
-    # ── Curation checklist ────────────────────────────────────────────────────
-    st.markdown("## Curation Checklist")
-
-    high_items  = [r for r in breakdown if r.get("priority") == "HIGH"  and r.get("curability") != "NO"]
-    med_items   = [r for r in breakdown if r.get("priority") == "MEDIUM" and r.get("curability") != "NO"]
-    skip_items  = [r for r in breakdown if r.get("curability") == "NO"]
-
-    if high_items:
-        st.markdown("### High Priority")
-        for r in high_items:
-            st.markdown("- **{} / {}** → `{}`{}".format(
-                r["file"], r["sheet"], _fmt_label(r["cbio_format"]),
-                " *(missing: {})*".format(", ".join(r.get("req_missing", []))) if r.get("req_missing") else ""
-            ))
-        st.markdown("### Medium Priority")
-        for r in med_items:
-            st.markdown("- **{} / {}** → `{}`{}".format(
-                r["file"], r["sheet"], _fmt_label(r["cbio_format"]),
-                " *(missing: {})*".format(", ".join(r.get("req_missing", []))) if r.get("req_missing") else ""
-            ))
-
-    if skip_items:
-        st.markdown("### Needs Manual Intervention")
-        for r in skip_items:
-            st.markdown("- {} / {}".format(r["file"], r["sheet"]))
-
-    st.divider()
-
-    # ── Study metadata for meta files ─────────────────────────────────────────
     st.markdown("## Suggested Study Metadata")
-    st.markdown("Use these values when creating your `meta_study.txt` and `meta_cancer_type.txt` files.")
-
     meta_rows = {
         "cancer_study_identifier": summary.get("study_id") or "—",
-        "name":                    meta.get("study_title") or "—",
-        "description":             meta.get("meta_description") or meta.get("description") or "—",
-        "cancer_type":             meta.get("cancer_type") or "—",
-        "short_name":              meta.get("study_id_suggestion") or "—",
-        "pmid":                    meta.get("pmid") or "—",
-        "groups":                  "PUBLIC",
+        "name": meta.get("study_title") or "—",
+        "description": meta.get("meta_description") or meta.get("description") or "—",
+        "cancer_type": meta.get("cancer_type") or "—",
+        "short_name": meta.get("study_id_suggestion") or "—",
+        "pmid": meta.get("pmid") or "—",
+        "groups": "PUBLIC",
     }
-    meta_df = pd.DataFrame(
-        [{"Field": k, "Value": v} for k, v in meta_rows.items()]
-    )
+    meta_df = pd.DataFrame([{"Field": key, "Value": value} for key, value in meta_rows.items()])
     st.dataframe(meta_df, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.title("cBioAbstractor")
+    st.caption("Automated curation support for cancer genomics studies.")
+    st.divider()
+
+    entered_key = st.text_input(
+        "Anthropic API key",
+        type="password",
+        value="" if _get_api_key() else "",
+        placeholder="sk-ant-...",
+        help="For local use, you can also set ANTHROPIC_API_KEY in your shell.",
+    )
+    if entered_key:
+        os.environ["ANTHROPIC_API_KEY"] = entered_key.strip()
+        _API_KEY = entered_key.strip()
+
+    if _get_api_key():
+        st.success("Connected")
+    else:
+        st.warning("API key not configured")
+
+    st.divider()
+    st.caption("Version 1.2 — Streamlit only")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Header
+# ─────────────────────────────────────────────────────────────────────────────
+st.title("cBioAbstractor")
+st.markdown(
+    "Upload a published cancer genomics paper and supplementary data files "
+    "to generate a structured cBioPortal curation summary."
+)
+
+
+tab_curate, tab_detect = st.tabs(["Curation Report", "File Classification"])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -482,624 +352,122 @@ def _render_inline_report(meta: dict, records: list, summary: dict):
 with tab_curate:
     st.subheader("Curation Report Generator")
     st.markdown(
-        "Upload the published paper PDF and its supplementary data files. "
-        "The tool will extract study metadata, classify each data file against "
-        "cBioPortal format requirements, and produce a structured curation summary."
+        "Upload the main paper PDF and supplementary files. The tool extracts "
+        "study metadata and classifies each file against cBioPortal formats."
     )
 
-    # Spec freshness indicator
     try:
         from spec_fetcher import fetch_spec
-        _spec = fetch_spec()
-        if _spec.get("source") == "live":
-            st.caption(
-                f"Format specifications loaded from cBioPortal documentation "
-                f"({len(_spec.get('specs', []))} formats)."
-            )
+
+        spec_info = fetch_spec()
+        if spec_info.get("source") == "live":
+            st.caption(f"Format specifications loaded from live cBioPortal docs ({len(spec_info.get('specs', []))} formats).")
         else:
-            st.caption("Using embedded format specifications (offline mode).")
+            st.caption("Using embedded cBioPortal format specifications.")
     except Exception:
-        pass
+        st.caption("Using embedded cBioPortal format specifications.")
 
     st.divider()
-
     col_pdf, col_supp = st.columns(2)
     with col_pdf:
-        st.markdown("#### Paper PDF")
-        paper_pdf = st.file_uploader(
-            "Select the main paper PDF",
-            type=["pdf"],
-            key="cbio_paper_pdf",
-        )
-
-    confirmed_names: list[str] = []  # populated below when files are uploaded
-
+        paper_pdf = st.file_uploader("Main paper PDF", type=["pdf"], key="paper_pdf")
     with col_supp:
-        st.markdown("#### Supplementary Files")
         supp_files = st.file_uploader(
-            "Select supplementary data files",
+            "Supplementary files",
             type=["xlsx", "xls", "csv", "tsv", "txt", "tab", "maf", "doc", "docx", "pdf"],
             accept_multiple_files=True,
-            key="cbio_supp_files",
-            help="Accepts Excel, CSV, TSV, MAF, and Word files.",
+            key="supp_files",
         )
-
-    # ── Filename inputs ───────────────────────────────────────────────────────
-    # Always show name fields when files are uploaded. Names are written to
-    # session_state immediately and read back at button-click time, so they
-    # survive the Streamlit re-run that the button triggers.
-    if "fname_count" not in st.session_state:
-        st.session_state["fname_count"] = 0
 
     if supp_files:
-        # Update session_state with current file list on every render
-        st.session_state["fname_count"] = len(supp_files)
-        import re as _re_name
-        def _looks_tmp(n):
-            return bool(_re_name.match(r'^tmp[a-z0-9_]{4,}', os.path.splitext(n)[0], _re_name.I))
-
-        st.divider()
-        st.markdown("#### File Names")
-        st.caption("Auto-filled below — edit if any name is wrong before clicking Generate.")
+        st.markdown("#### Confirm uploaded filenames")
+        st.caption("Edit names here only if Streamlit shows temporary filenames.")
         cols = st.columns(min(len(supp_files), 3))
-        for i, sf in enumerate(supp_files):
-            ext  = os.path.splitext(sf.name)[1] or ".xlsx"
-            auto = f"Supplementary_Data_{i+1}{ext}"
-            # Only auto-fill if current stored value looks like a temp name or is missing
-            current = st.session_state.get(f"fname_{i}", "")
-            if not current or _looks_tmp(current):
-                default = auto if _looks_tmp(sf.name) else sf.name
-            else:
-                default = current
-            val = cols[i % len(cols)].text_input(
-                f"File {i+1}", value=default, key=f"fname_widget_{i}"
-            )
-            st.session_state[f"fname_{i}"] = val.strip() or auto
-
-    st.divider()
+        for idx, file in enumerate(supp_files):
+            ext = os.path.splitext(file.name)[1] or ".xlsx"
+            auto_name = f"Supplementary_Data_{idx + 1}{ext}"
+            default = auto_name if _looks_tmp(file.name) else file.name
+            st.text_input(f"File {idx + 1}", value=default, key=f"fname_{idx}")
 
     with st.expander("Options"):
-        llm_model = st.selectbox(
-            "AI model",
+        model = st.selectbox(
+            "Anthropic model",
             options=[
-                "anthropic/claude-sonnet-4-20250514",
-                "anthropic/claude-3-5-haiku-20241022",
-                "openai/gpt-4o",
-                "openai/gpt-4-turbo",
+                "claude-sonnet-4-20250514",
+                "claude-3-5-haiku-20241022",
+                "claude-3-5-sonnet-20241022",
             ],
-            key="cbio_llm_model",
-        )
-        temperature = st.slider(
-            "Response variability (0 = consistent, 1 = creative)",
-            0.0, 1.0, 0.2, 0.05,
-            key="cbio_temp",
+            index=0,
         )
 
-    if st.button(
-        "Generate Curation Report",
-        disabled=(paper_pdf is None),
-        type="primary",
-        key="cbio_run_btn",
-    ):
+    if st.button("Generate Curation Report", disabled=paper_pdf is None, type="primary"):
         if not _require_api_key():
             st.stop()
 
-<<<<<<< HEAD
-        with st.spinner("Saving uploaded files..."):
-            pdf_tmp, _pdf_name = _save_upload_to_tmp(paper_pdf)
-            supp_list = list(supp_files or [])
-
-            # Read names from session_state — these were saved when the user
-            # saw the File Names section, and survive the button re-run.
-            n = st.session_state.get("fname_count", len(supp_list))
-            orig_names = [
-                st.session_state.get(f"fname_{i}",
-                    f"Supplementary_Data_{i+1}.xlsx")
-                for i in range(n)
-            ]
-            # Trim/pad to match actual number of uploaded files
-            orig_names = orig_names[:len(supp_list)]
-            while len(orig_names) < len(supp_list):
-                orig_names.append(f"Supplementary_Data_{len(orig_names)+1}.xlsx")
-
-            # Save each file using the confirmed original name
-            supp_tmps = []
-            for sf, orig in zip(supp_list, orig_names):
-                tmp_dir = tempfile.mkdtemp()
-                dest    = os.path.join(tmp_dir, orig)
-                with open(dest, "wb") as fh:
-                    fh.write(sf.getvalue())
-                supp_tmps.append(dest)
-
-        try:
-            use_anthropic   = llm_model.startswith("anthropic/")
-            anthropic_model = llm_model.split("/", 1)[1] if use_anthropic else None
-
-            with st.spinner("Extracting study metadata and classifying files. This may take 1–3 minutes..."):
-                if use_anthropic:
-                    import re as _re
-                    import anthropic as _anthropic
-                    from cbioportal_curator import (
-                        _extract_pdf_text,
-                        _analyse_supplementary_files,
-                        SYSTEM_PROMPT_CURATOR,
-                    )
-
-                    pdf_text  = _extract_pdf_text(pdf_tmp)
-                    _client   = _anthropic.Anthropic(api_key=_get_api_key())
-                    _resp     = _client.messages.create(
-                        model=anthropic_model,
-                        max_tokens=2000,
-                        system=SYSTEM_PROMPT_CURATOR,
-                        messages=[{"role": "user", "content": pdf_text[:40000]}],
-                    )
-                    raw_meta = _resp.content[0].text.strip()
-                    raw_meta = _re.sub(r"^```[^\n]*\n?", "", raw_meta, flags=_re.MULTILINE)
-                    raw_meta = _re.sub(r"```$",          "", raw_meta, flags=_re.MULTILINE).strip()
-                    meta    = json.loads(raw_meta)
-
-                    # Since each file is already saved as its original name,
-                    # Path(path).name inside the curator returns the real filename.
-                    records = _analyse_supplementary_files(supp_tmps)
-
-                    # Positional patch — guarantee original names regardless of
-                    # what the curator stored. Group records by the file key they
-                    # contain, then overwrite in upload order.
-                    _by_file: dict[str, list] = {}
-                    for rec in records:
-                        _by_file.setdefault(rec.get("file", ""), []).append(rec)
-
-                    for i, orig in enumerate(orig_names):
-                        file_key = list(_by_file.keys())[i] if i < len(_by_file) else None
-                        if file_key and file_key != orig:
-                            for rec in _by_file[file_key]:
-                                rec["file"] = orig
-
-                    summary = {
-                        "study_id":         meta.get("study_id_suggestion"),
-                        "cancer_type":      meta.get("cancer_type"),
-                        "num_samples":      meta.get("num_samples"),
-                        "reference_genome": meta.get("reference_genome"),
-                        "files_analysed":   len(supp_tmps),
-                        "sheets_analysed":  len(records),
-                        "high_priority":    sum(1 for r in records if r.get("priority") == "HIGH"),
-                        "medium_priority":  sum(1 for r in records if r.get("priority") == "MEDIUM"),
-                        "not_loadable":     sum(1 for r in records if r.get("curability") == "NO"),
-                        "file_breakdown": [{
-                            "file":        r["file"],
-                            "sheet":       r["sheet"],
-                            "cbio_format": r["cbio_target_file"],
-                            "curability":  r["curability"],
-                            "priority":    r["priority"],
-                            "confidence":  r.get("confidence", 0),
-                            "verdict":     r.get("verdict", ""),
-                            "req_present": r.get("required_present", []),
-                            "req_missing": r.get("required_missing", []),
-                            "opt_present": r.get("optional_present", []),
-                        } for r in records],
-                    }
-
-                else:
-                    from cbioportal_curator import curate
-                    result  = curate(
-                        pdf_path=pdf_tmp, supp_paths=supp_tmps,
-                        llm_model=llm_model, temperature=temperature,
-                    )
-                    meta    = {}   # not separately returned by curate()
-                    summary = result["summary"]
-                    records = []
-
-        except Exception as exc:
-            st.error(f"Curation failed: {exc}")
-            with st.expander("Error details"):
-                st.code(traceback.format_exc())
-            st.stop()
-        finally:
-            try:
-                import shutil
-                shutil.rmtree(os.path.dirname(pdf_tmp), ignore_errors=True)
-                for p in supp_tmps:
-                    shutil.rmtree(os.path.dirname(p), ignore_errors=True)
-            except Exception:
-                pass
-
-        st.success("Curation complete.")
-        st.divider()
-        _render_inline_report(meta, records, summary)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 2 — File Classification
-# ═════════════════════════════════════════════════════════════════════════════
-with tab_detect:
-    st.subheader("File Classification")
-    st.markdown(
-        "Upload a single supplementary data file to identify which cBioPortal "
-        "format it corresponds to. The tool checks column names and data patterns "
-        "against the cBioPortal specification, then uses AI for ambiguous cases."
-    )
-
-    detect_file = st.file_uploader(
-        "Select a file to classify",
-        type=["xlsx", "xls", "csv", "tsv", "txt", "maf"],
-        key="detect_file",
-    )
-    use_ai = st.checkbox(
-        "Use AI for ambiguous files (requires API key)", value=True, key="det_use_ai"
-    )
-
-    if st.button("Classify File", disabled=(detect_file is None), key="detect_btn"):
-        from file_parser import parse_file
-        from cbio_detector import detect_file_type
-
-        with st.spinner("Parsing file..."):
-            try:
-                df = parse_file(detect_file.getvalue(), detect_file.name)
-            except Exception as exc:
-                st.error(f"Could not read file: {exc}")
-                st.stop()
-
-        st.markdown("#### File Preview")
-        st.dataframe(df.head(10), use_container_width=True)
-
-        akey = _get_api_key() if use_ai else None
-        with st.spinner("Classifying..."):
-            try:
-                result = detect_file_type(df, anthropic_api_key=akey)
-            except Exception as exc:
-                st.error(f"Classification failed: {exc}")
-                st.stop()
-
-        st.divider()
-        ca, cb, cc = st.columns(3)
-        ca.metric("Detected Format",   result["type"])
-        cb.metric("Confidence",        f"{result['confidence']*100:.0f}%")
-        cc.metric("Method",
-                  "Rule-based" if result["method"] == "heuristic" else "AI-assisted")
-
-        if result.get("reasoning"):
-            st.info(result["reasoning"])
-        if result.get("low_confidence"):
-            st.warning("Confidence is low — please verify the detected format manually.")
-
-        if result.get("column_mappings"):
-            st.markdown("#### Suggested Column Mappings")
-            st.dataframe(
-                pd.DataFrame(
-                    list(result["column_mappings"].items()),
-                    columns=["Original Column", "cBioPortal Column"],
-                ),
-                use_container_width=True, hide_index=True,
-            )
-
-        # Spec-based detail
-        try:
-            from spec_match import classify_sheet
-            sr = classify_sheet(df)
-            with st.expander("Detailed classification scores"):
-                st.markdown(f"**Best match:** {sr.format_key} ({sr.confidence:.1f}% confidence)")
-                st.markdown(f"**Target file:** {sr.target_file}")
-                if sr.required_missing:
-                    st.warning("Missing required columns: " + ", ".join(sr.required_missing))
-                if sr.required_present:
-                    st.success("Required columns found: " + ", ".join(sr.required_present))
-                if sr.all_scores:
-                    st.dataframe(pd.DataFrame(sr.all_scores),
-                                 use_container_width=True, hide_index=True)
-        except Exception:
-            pass
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Format Converter
-# ═════════════════════════════════════════════════════════════════════════════
-with tab_transform:
-    st.subheader("Format Converter")
-    st.markdown(
-        "Upload a raw supplementary data file, select the target cBioPortal "
-        "format, and the tool will reformat it to meet cBioPortal requirements — "
-        "including the correct header structure and a matching metadata file."
-    )
-
-    if not _get_api_key():
-        st.info("An API key is required to use the format converter.")
-
-    trans_file = st.file_uploader(
-        "Select file to convert",
-        type=["xlsx", "xls", "csv", "tsv", "txt", "maf"],
-        key="transform_file",
-    )
-
-    tr1, tr2 = st.columns(2)
-    with tr1:
-        from config import CBIO_FORMAT_IDS
-        cbio_type = st.selectbox(
-            "Target format",
-            options=CBIO_FORMAT_IDS,
-            key="transform_type",
-        )
-        study_id = st.text_input(
-            "Study identifier",
-            value="my_study_2025",
-            key="transform_study_id",
-            help="Used in the meta file. Typically lowercase with underscores, e.g. gist_smith_2024.",
-        )
-    with tr2:
-        curator_notes = st.text_area(
-            "Notes for the converter (optional)",
-            placeholder="Example: OS_MONTHS values are in days — divide by 30.44",
-            height=110,
-            key="transform_notes",
-        )
-
-    if st.button(
-        "Convert File",
-        disabled=(trans_file is None),
-        type="primary",
-        key="transform_btn",
-    ):
-        if not _require_api_key():
-            st.stop()
-
-        from file_parser import parse_file
-        from cbio_transformer import transform_to_cbio
-
-        with st.spinner("Reading file..."):
-            try:
-                df = parse_file(trans_file.getvalue(), trans_file.name)
-            except Exception as exc:
-                st.error(f"Could not read file: {exc}")
-                st.stop()
-
-        st.markdown("#### Input Preview")
-        st.dataframe(df.head(8), use_container_width=True)
-
-        with st.spinner("Converting to cBioPortal format..."):
-            try:
-                result = transform_to_cbio(
-                    df=df,
-                    cbio_type=cbio_type,
-                    study_id=study_id,
-                    curator_notes=curator_notes,
-                    anthropic_api_key=_get_api_key(),
-                )
-            except Exception as exc:
-                st.error(f"Conversion failed: {exc}")
-                with st.expander("Error details"):
-                    st.code(traceback.format_exc())
-                st.stop()
-
-        st.success("Conversion complete.")
-        st.divider()
-
-        out1, out2 = st.columns(2)
-
-        with out1:
-            st.markdown(f"#### Data File — `{result['data_filename']}`")
-            try:
-                lines = result["data_content"].splitlines()
-                data_lines = [l for l in lines if not l.startswith("#")]
-                preview_df = pd.read_csv(
-                    io.StringIO("\n".join(data_lines)),
-                    sep="\t", dtype=str, engine="python",
-                )
-                st.dataframe(preview_df.head(15), use_container_width=True)
-            except Exception:
-                st.text(result["data_content"][:2000])
-
-            st.download_button(
-                f"Download {result['data_filename']}",
-                data=result["data_content"].encode("utf-8"),
-                file_name=result["data_filename"],
-                mime="text/plain",
-            )
-
-        with out2:
-            st.markdown(f"#### Metadata File — `{result['meta_filename']}`")
-            st.code(result["meta_content"], language="yaml")
-            st.download_button(
-                f"Download {result['meta_filename']}",
-                data=result["meta_content"].encode("utf-8"),
-                file_name=result["meta_filename"],
-                mime="text/plain",
-            )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 4 — Training Examples
-# ═════════════════════════════════════════════════════════════════════════════
-with tab_examples:
-    st.subheader("Training Examples")
-    st.markdown(
-        "Save verified input/output file pairs to improve classification and "
-        "conversion accuracy over time. Each saved example is automatically "
-        "used as a reference on future runs."
-    )
-
-    try:
-        from few_shot_manager import list_examples, save_example, delete_example
-
-        examples = list_examples()
-        if examples:
-            st.markdown(f"**{len(examples)} example(s) saved**")
-            ex_df = pd.DataFrame([{
-                "ID":          e["id"],
-                "Format":      e["type"],
-                "Description": e["description"],
-                "Saved":       e["created_at"][:19].replace("T", " ") if e["created_at"] else "",
-                "Input":       "Yes" if e["has_input"]  else "No",
-                "Output":      "Yes" if e["has_output"] else "No",
-            } for e in examples])
-            st.dataframe(ex_df, use_container_width=True, hide_index=True)
-
-            del_id = st.selectbox(
-                "Remove an example",
-                options=["— select —"] + [e["id"] for e in examples],
-                key="del_example_id",
-            )
-            if st.button("Remove Selected Example", key="del_example_btn"):
-                if del_id != "— select —":
-                    if delete_example(del_id):
-                        st.success(f"Example {del_id} removed.")
-                        st.rerun()
-                    else:
-                        st.error("Could not remove example.")
-        else:
-            st.info("No training examples saved yet.")
-
-        st.divider()
-        st.markdown("#### Add New Example")
-
-        from config import CBIO_FORMAT_IDS as _FIDS
-        ex_type = st.selectbox("cBioPortal format", _FIDS, key="new_ex_type")
-        ex_desc = st.text_input("Description (optional)", key="new_ex_desc")
-
-        ec1, ec2 = st.columns(2)
-        with ec1:
-            st.markdown("**Input file** (raw supplementary data)")
-            input_upload = st.file_uploader(
-                "Select input file (.tsv or .csv)",
-                type=["tsv", "txt", "csv"], key="new_ex_input",
-            )
-        with ec2:
-            st.markdown("**Output file** (correctly formatted cBioPortal file)")
-            output_upload = st.file_uploader(
-                "Select output file (.tsv or .txt)",
-                type=["tsv", "txt"], key="new_ex_output",
-            )
-
-        if st.button("Save Example", key="save_ex_btn"):
-            if not input_upload or not output_upload:
-                st.warning("Please provide both an input and an output file.")
-            else:
-                eid = save_example(
-                    input_tsv=input_upload.getvalue().decode("utf-8", errors="replace"),
-                    output_tsv=output_upload.getvalue().decode("utf-8", errors="replace"),
-                    cbio_type=ex_type,
-                    description=ex_desc,
-                )
-                st.success(f"Example {eid} saved for format: {ex_type}.")
-                st.rerun()
-
-    except Exception as _e:
-        st.error(f"Training example manager unavailable: {_e}")
-        st.code(traceback.format_exc())
-=======
-        # ── Save uploads ──────────────────────────────────────────────────────
-        pdf_tmp    = None
+        pdf_tmp: str | None = None
         supp_tmps: list[str] = []
+
         try:
             with st.spinner("Saving uploaded files..."):
-                pdf_tmp, _ = _save_upload_to_tmp(paper_pdf)
-                supp_list  = list(supp_files or [])
+                pdf_tmp = _save_upload_to_tmp(paper_pdf)
+                for idx, uploaded in enumerate(supp_files or []):
+                    filename = st.session_state.get(f"fname_{idx}") or uploaded.name
+                    supp_tmps.append(_save_upload_to_tmp(uploaded, filename=filename))
 
-                # Read names from session_state (survive button re-run)
-                n = st.session_state.get("fname_count", len(supp_list))
-                orig_names = [
-                    st.session_state.get(f"fname_{i}", f"Supplementary_Data_{i+1}.xlsx")
-                    for i in range(n)
-                ]
-                orig_names = orig_names[:len(supp_list)]
-                while len(orig_names) < len(supp_list):
-                    orig_names.append(f"Supplementary_Data_{len(orig_names)+1}.xlsx")
-
-                for sf, orig in zip(supp_list, orig_names):
-                    tmp_dir = tempfile.mkdtemp()
-                    dest    = os.path.join(tmp_dir, orig)
-                    with open(dest, "wb") as fh:
-                        fh.write(sf.getvalue())
-                    supp_tmps.append(dest)
-
-            use_anthropic   = llm_model.startswith("anthropic/")
-            anthropic_model = llm_model.split("/", 1)[1] if use_anthropic else None
-
-            # ── Step 1: Extract metadata ──────────────────────────────────────
-            meta: dict = {}
             with st.spinner("Step 1 of 2 — Extracting study metadata from PDF..."):
-                if use_anthropic:
-                    import anthropic as _anthropic
-                    from cbioportal_curator import _extract_pdf_text, SYSTEM_PROMPT_CURATOR
+                import anthropic
+                from cbioportal_curator import SYSTEM_PROMPT_CURATOR, _extract_pdf_text
 
-                    pdf_text = _extract_pdf_text(pdf_tmp)
-                    if not pdf_text.strip():
-                        st.warning("Could not extract text from the PDF. Metadata fields will be blank.")
-                    else:
-                        _client = _anthropic.Anthropic(api_key=_get_api_key())
-                        try:
-                            raw_meta = _call_anthropic_with_retry(
-                                _client,
-                                model=anthropic_model,
-                                system=SYSTEM_PROMPT_CURATOR,
-                                user_content=pdf_text[:40000],
-                                max_tokens=2000,
-                            )
-                            meta = _parse_llm_json(raw_meta)
-                        except json.JSONDecodeError:
-                            st.warning("Metadata extraction returned unexpected format. Continuing with file classification.")
-                            meta = {}
-                        except Exception as e:
-                            st.warning(f"Metadata extraction failed ({e}). Continuing with file classification.")
-                            meta = {}
-
-            # ── Step 2: Classify supplementary files ─────────────────────────
-            records: list[dict] = []
-            with st.spinner(f"Step 2 of 2 — Classifying {len(supp_tmps)} supplementary file(s)..."):
-                if use_anthropic:
-                    from cbioportal_curator import _analyse_supplementary_files
-
-                    try:
-                        records = _analyse_supplementary_files(supp_tmps)
-                    except Exception as e:
-                        st.error(f"File classification failed: {e}")
-                        with st.expander("Error details"):
-                            st.code(traceback.format_exc())
-                        st.stop()
-
-                    # Positional filename patch
-                    _by_file: dict[str, list] = {}
-                    for rec in records:
-                        _by_file.setdefault(rec.get("file", ""), []).append(rec)
-                    for i, orig in enumerate(orig_names):
-                        key = list(_by_file.keys())[i] if i < len(_by_file) else None
-                        if key and key != orig:
-                            for rec in _by_file[key]:
-                                rec["file"] = orig
-
-                else:
-                    from cbioportal_curator import curate
-                    result  = curate(
-                        pdf_path=pdf_tmp, supp_paths=supp_tmps,
-                        llm_model=llm_model, temperature=temperature,
+                pdf_text = _extract_pdf_text(pdf_tmp)
+                meta: dict[str, Any] = {}
+                if pdf_text.strip():
+                    client = anthropic.Anthropic(api_key=_get_api_key())
+                    raw_meta = _call_anthropic_with_retry(
+                        client=client,
+                        model=model,
+                        system=SYSTEM_PROMPT_CURATOR,
+                        user_content=pdf_text[:40000],
+                        max_tokens=2000,
                     )
-                    meta    = meta or {}
-                    records = []
-                    summary = result["summary"]
+                    try:
+                        meta = _parse_llm_json(raw_meta)
+                    except Exception:
+                        st.warning("Metadata extraction returned unexpected format. Continuing with file classification.")
+                        meta = {}
+                else:
+                    st.warning("Could not extract text from the PDF. Metadata fields will be blank.")
 
-            # ── Build summary ─────────────────────────────────────────────────
-            if use_anthropic:
-                summary = {
-                    "study_id":         meta.get("study_id_suggestion") or "—",
-                    "cancer_type":      meta.get("cancer_type") or "—",
-                    "num_samples":      meta.get("num_samples") or "—",
-                    "reference_genome": meta.get("reference_genome") or "—",
-                    "files_analysed":   len(supp_tmps),
-                    "sheets_analysed":  len(records),
-                    "high_priority":    sum(1 for r in records if r.get("priority") == "HIGH"),
-                    "medium_priority":  sum(1 for r in records if r.get("priority") == "MEDIUM"),
-                    "not_loadable":     sum(1 for r in records if r.get("curability") == "NO"),
-                    "file_breakdown": [{
-                        "file":        r["file"],
-                        "sheet":       r["sheet"],
+            with st.spinner(f"Step 2 of 2 — Classifying {len(supp_tmps)} supplementary file(s)..."):
+                from cbioportal_curator import _analyse_supplementary_files
+
+                records = _analyse_supplementary_files(supp_tmps)
+
+            summary = {
+                "study_id": meta.get("study_id_suggestion") or "—",
+                "cancer_type": meta.get("cancer_type") or "—",
+                "num_samples": meta.get("num_samples") or "—",
+                "reference_genome": meta.get("reference_genome") or "—",
+                "files_analysed": len(supp_tmps),
+                "sheets_analysed": len(records),
+                "high_priority": sum(1 for r in records if r.get("priority") == "HIGH"),
+                "medium_priority": sum(1 for r in records if r.get("priority") == "MEDIUM"),
+                "not_loadable": sum(1 for r in records if r.get("curability") == "NO"),
+                "file_breakdown": [
+                    {
+                        "file": r.get("file", "—"),
+                        "sheet": r.get("sheet", "—"),
                         "cbio_format": r.get("cbio_target_file", "—"),
-                        "curability":  r.get("curability", "NO"),
-                        "priority":    r.get("priority", "N/A"),
-                        "confidence":  r.get("confidence", 0),
-                        "verdict":     r.get("verdict", ""),
+                        "curability": r.get("curability", "NO"),
+                        "priority": r.get("priority", "N/A"),
+                        "confidence": r.get("confidence", 0),
+                        "verdict": r.get("verdict", ""),
                         "req_present": r.get("required_present", []),
                         "req_missing": r.get("required_missing", []),
                         "opt_present": r.get("optional_present", []),
-                    } for r in records],
-                }
+                    }
+                    for r in records
+                ],
+            }
 
         except Exception as exc:
             st.error(f"Curation failed: {exc}")
@@ -1111,7 +479,7 @@ with tab_examples:
 
         st.success("Curation complete.")
         st.divider()
-        _render_inline_report(meta, records, summary)
+        _render_inline_report(meta, summary)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1120,23 +488,23 @@ with tab_examples:
 with tab_detect:
     st.subheader("File Classification")
     st.markdown(
-        "Upload a single supplementary data file to identify which cBioPortal "
-        "format it corresponds to. The tool checks column names and data patterns "
-        "against the cBioPortal specification, then uses AI for ambiguous cases."
+        "Upload one supplementary file to detect which cBioPortal format it most closely matches."
     )
 
     detect_file = st.file_uploader(
-        "Select a file to classify",
-        type=["xlsx", "xls", "csv", "tsv", "txt", "maf"],
+        "File to classify",
+        type=["xlsx", "xls", "csv", "tsv", "txt", "tab", "maf"],
         key="detect_file",
     )
-    use_ai = st.checkbox(
-        "Use AI for ambiguous files (requires API key)", value=True, key="det_use_ai"
-    )
+    use_ai = st.checkbox("Use AI for ambiguous files", value=True, key="use_ai_detection")
 
-    if st.button("Classify File", disabled=(detect_file is None), key="detect_btn"):
-        from file_parser import parse_file
-        from cbio_detector import detect_file_type
+    if st.button("Classify File", disabled=detect_file is None):
+        try:
+            from cbio_detector import detect_file_type
+            from file_parser import parse_file
+        except Exception as exc:
+            st.error(f"Could not load classification modules: {exc}")
+            st.stop()
 
         with st.spinner("Parsing file..."):
             try:
@@ -1148,50 +516,46 @@ with tab_detect:
         st.markdown("#### File Preview")
         st.dataframe(df.head(10), use_container_width=True)
 
-        akey = _get_api_key() if use_ai else None
-        with st.spinner("Classifying..."):
+        api_key = _get_api_key() if use_ai else None
+        with st.spinner("Classifying file..."):
             try:
-                result = detect_file_type(df, anthropic_api_key=akey)
+                result = detect_file_type(df, anthropic_api_key=api_key)
             except Exception as exc:
                 st.error(f"Classification failed: {exc}")
                 st.stop()
 
         st.divider()
-        ca, cb, cc = st.columns(3)
-        ca.metric("Detected Format",   result["type"])
-        cb.metric("Confidence",        f"{result['confidence']*100:.0f}%")
-        cc.metric("Method",
-                  "Rule-based" if result["method"] == "heuristic" else "AI-assisted")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Detected Format", result.get("type", "—"))
+        col2.metric("Confidence", f"{float(result.get('confidence', 0)) * 100:.0f}%")
+        col3.metric("Method", "Rule-based" if result.get("method") == "heuristic" else result.get("method", "—"))
 
         if result.get("reasoning"):
             st.info(result["reasoning"])
         if result.get("low_confidence"):
             st.warning("Confidence is low — please verify the detected format manually.")
 
-        if result.get("column_mappings"):
+        mappings = result.get("column_mappings") or {}
+        if mappings:
             st.markdown("#### Suggested Column Mappings")
             st.dataframe(
-                pd.DataFrame(
-                    list(result["column_mappings"].items()),
-                    columns=["Original Column", "cBioPortal Column"],
-                ),
-                use_container_width=True, hide_index=True,
+                pd.DataFrame(list(mappings.items()), columns=["Original Column", "cBioPortal Column"]),
+                use_container_width=True,
+                hide_index=True,
             )
 
-        # Spec-based detail
         try:
             from spec_match import classify_sheet
-            sr = classify_sheet(df)
+
+            spec_result = classify_sheet(df)
             with st.expander("Detailed classification scores"):
-                st.markdown(f"**Best match:** {sr.format_key} ({sr.confidence:.1f}% confidence)")
-                st.markdown(f"**Target file:** {sr.target_file}")
-                if sr.required_missing:
-                    st.warning("Missing required columns: " + ", ".join(sr.required_missing))
-                if sr.required_present:
-                    st.success("Required columns found: " + ", ".join(sr.required_present))
-                if sr.all_scores:
-                    st.dataframe(pd.DataFrame(sr.all_scores),
-                                 use_container_width=True, hide_index=True)
+                st.markdown(f"**Best match:** {spec_result.format_key} ({spec_result.confidence:.1f}% confidence)")
+                st.markdown(f"**Target file:** {spec_result.target_file}")
+                if spec_result.required_missing:
+                    st.warning("Missing required columns: " + ", ".join(spec_result.required_missing))
+                if spec_result.required_present:
+                    st.success("Required columns found: " + ", ".join(spec_result.required_present))
+                if spec_result.all_scores:
+                    st.dataframe(pd.DataFrame(spec_result.all_scores), use_container_width=True, hide_index=True)
         except Exception:
             pass
->>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
