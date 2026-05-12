@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import os
+<<<<<<< HEAD
 import sys
 import json
 import tempfile
@@ -15,6 +16,26 @@ import importlib
 
 import streamlit as st
 
+=======
+import re
+import sys
+import json
+import time
+import shutil
+import tempfile
+import traceback
+import importlib
+import importlib.util
+import logging
+from pathlib import Path
+from typing import Optional
+
+import streamlit as st
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 # ── Path setup ────────────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -87,6 +108,75 @@ def _load_api_key() -> str:
 
 _API_KEY = _load_api_key()
 
+<<<<<<< HEAD
+=======
+# ── Runtime key override (for shared/cloud deployments) ───────────────────────
+if not _API_KEY:
+    try:
+        _API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+        if _API_KEY:
+            os.environ["ANTHROPIC_API_KEY"] = _API_KEY
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions — defined BEFORE sidebar so they can be called there
+# ─────────────────────────────────────────────────────────────────────────────
+def _get_api_key() -> str:
+    return _API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+
+def _require_api_key() -> bool:
+    if not _get_api_key():
+        st.error("⬅️ Enter your Anthropic API key in the sidebar to continue.")
+        return False
+    return True
+
+def _save_upload_to_tmp(uploaded) -> tuple[str, str]:
+    original_name = uploaded.name
+    tmp_dir = tempfile.mkdtemp()
+    path = os.path.join(tmp_dir, original_name)
+    with open(path, "wb") as f:
+        f.write(uploaded.getvalue())
+    return path, original_name
+
+def _safe_cleanup(*paths: str) -> None:
+    for p in paths:
+        try:
+            shutil.rmtree(os.path.dirname(p), ignore_errors=True)
+        except Exception:
+            pass
+
+def _call_anthropic_with_retry(client, model, system, user_content,
+                                max_tokens=2000, retries=3, backoff=5.0):
+    import anthropic
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            resp = client.messages.create(
+                model=model, max_tokens=max_tokens, system=system,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            return resp.content[0].text
+        except anthropic.RateLimitError as e:
+            time.sleep(backoff * (attempt + 1)); last_exc = e
+        except anthropic.APIStatusError as e:
+            if e.status_code >= 500:
+                time.sleep(backoff * (attempt + 1)); last_exc = e
+            else:
+                raise
+        except anthropic.APIConnectionError as e:
+            time.sleep(backoff * (attempt + 1)); last_exc = e
+    raise last_exc or RuntimeError("API call failed after retries")
+
+def _parse_llm_json(raw: str) -> dict:
+    raw = re.sub(r"^```[^\n]*\n?", "", raw.strip(), flags=re.MULTILINE)
+    raw = re.sub(r"```$", "", raw, flags=re.MULTILINE).strip()
+    return json.loads(raw)
+
+def _looks_tmp(name: str) -> bool:
+    return bool(re.match(r'^tmp[a-z0-9_]{4,}', os.path.splitext(name)[0], re.I))
+
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -96,6 +186,7 @@ with st.sidebar:
     st.divider()
 
     if _missing:
+<<<<<<< HEAD
         st.error("Missing packages. Run:")
         st.code("pip install " + " ".join(_missing))
 
@@ -109,6 +200,17 @@ with st.sidebar:
 
     st.divider()
     st.caption("Version 1.0")
+=======
+        st.warning("Some packages are installing. Please refresh in 1–2 minutes.")
+
+    if _get_api_key():
+        st.success("Connected")
+    else:
+        st.warning("API key not configured. Contact your administrator.")
+
+    st.divider()
+    st.caption("Version 1.1")
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Header
@@ -122,15 +224,22 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
+<<<<<<< HEAD
 tab_curate, tab_detect, tab_transform, tab_examples = st.tabs([
     "Curation Report",
     "File Classification",
     "Format Converter",
     "Training Examples",
+=======
+tab_curate, tab_detect = st.tabs([
+    "Curation Report",
+    "File Classification",
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+<<<<<<< HEAD
 # Shared helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_api_key() -> str:
@@ -173,6 +282,26 @@ def _colour_priority(val):
         "N/A":    "background-color:#F2F2F2;color:#595959",
     }.get(val, "")
 
+=======
+# Colour helpers for the report table
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _colour_curability(val):
+    return {
+        "Yes":                      "background-color:#E2EFDA;color:#375623",
+        "Partly curatable":           "background-color:#FFF2CC;color:#7F6000",
+        "Needs manual intervention": "background-color:#FCE4D6;color:#843C0C",
+    }.get(val, "")
+
+def _colour_priority(val):
+    return {
+        "HIGH":   "background-color:#FCE4D6;color:#843C0C",
+        "MEDIUM": "background-color:#FFF2CC;color:#7F6000",
+        "LOW":    "background-color:#E2EFDA;color:#375623",
+        "N/A":    "background-color:#F2F2F2;color:#595959",
+    }.get(val, "")
+
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
 def _colour_confidence(val):
     try:
         v = float(str(val).replace("%", ""))
@@ -455,6 +584,7 @@ with tab_curate:
         if not _require_api_key():
             st.stop()
 
+<<<<<<< HEAD
         with st.spinner("Saving uploaded files..."):
             pdf_tmp, _pdf_name = _save_upload_to_tmp(paper_pdf)
             supp_list = list(supp_files or [])
@@ -854,3 +984,214 @@ with tab_examples:
     except Exception as _e:
         st.error(f"Training example manager unavailable: {_e}")
         st.code(traceback.format_exc())
+=======
+        # ── Save uploads ──────────────────────────────────────────────────────
+        pdf_tmp    = None
+        supp_tmps: list[str] = []
+        try:
+            with st.spinner("Saving uploaded files..."):
+                pdf_tmp, _ = _save_upload_to_tmp(paper_pdf)
+                supp_list  = list(supp_files or [])
+
+                # Read names from session_state (survive button re-run)
+                n = st.session_state.get("fname_count", len(supp_list))
+                orig_names = [
+                    st.session_state.get(f"fname_{i}", f"Supplementary_Data_{i+1}.xlsx")
+                    for i in range(n)
+                ]
+                orig_names = orig_names[:len(supp_list)]
+                while len(orig_names) < len(supp_list):
+                    orig_names.append(f"Supplementary_Data_{len(orig_names)+1}.xlsx")
+
+                for sf, orig in zip(supp_list, orig_names):
+                    tmp_dir = tempfile.mkdtemp()
+                    dest    = os.path.join(tmp_dir, orig)
+                    with open(dest, "wb") as fh:
+                        fh.write(sf.getvalue())
+                    supp_tmps.append(dest)
+
+            use_anthropic   = llm_model.startswith("anthropic/")
+            anthropic_model = llm_model.split("/", 1)[1] if use_anthropic else None
+
+            # ── Step 1: Extract metadata ──────────────────────────────────────
+            meta: dict = {}
+            with st.spinner("Step 1 of 2 — Extracting study metadata from PDF..."):
+                if use_anthropic:
+                    import anthropic as _anthropic
+                    from cbioportal_curator import _extract_pdf_text, SYSTEM_PROMPT_CURATOR
+
+                    pdf_text = _extract_pdf_text(pdf_tmp)
+                    if not pdf_text.strip():
+                        st.warning("Could not extract text from the PDF. Metadata fields will be blank.")
+                    else:
+                        _client = _anthropic.Anthropic(api_key=_get_api_key())
+                        try:
+                            raw_meta = _call_anthropic_with_retry(
+                                _client,
+                                model=anthropic_model,
+                                system=SYSTEM_PROMPT_CURATOR,
+                                user_content=pdf_text[:40000],
+                                max_tokens=2000,
+                            )
+                            meta = _parse_llm_json(raw_meta)
+                        except json.JSONDecodeError:
+                            st.warning("Metadata extraction returned unexpected format. Continuing with file classification.")
+                            meta = {}
+                        except Exception as e:
+                            st.warning(f"Metadata extraction failed ({e}). Continuing with file classification.")
+                            meta = {}
+
+            # ── Step 2: Classify supplementary files ─────────────────────────
+            records: list[dict] = []
+            with st.spinner(f"Step 2 of 2 — Classifying {len(supp_tmps)} supplementary file(s)..."):
+                if use_anthropic:
+                    from cbioportal_curator import _analyse_supplementary_files
+
+                    try:
+                        records = _analyse_supplementary_files(supp_tmps)
+                    except Exception as e:
+                        st.error(f"File classification failed: {e}")
+                        with st.expander("Error details"):
+                            st.code(traceback.format_exc())
+                        st.stop()
+
+                    # Positional filename patch
+                    _by_file: dict[str, list] = {}
+                    for rec in records:
+                        _by_file.setdefault(rec.get("file", ""), []).append(rec)
+                    for i, orig in enumerate(orig_names):
+                        key = list(_by_file.keys())[i] if i < len(_by_file) else None
+                        if key and key != orig:
+                            for rec in _by_file[key]:
+                                rec["file"] = orig
+
+                else:
+                    from cbioportal_curator import curate
+                    result  = curate(
+                        pdf_path=pdf_tmp, supp_paths=supp_tmps,
+                        llm_model=llm_model, temperature=temperature,
+                    )
+                    meta    = meta or {}
+                    records = []
+                    summary = result["summary"]
+
+            # ── Build summary ─────────────────────────────────────────────────
+            if use_anthropic:
+                summary = {
+                    "study_id":         meta.get("study_id_suggestion") or "—",
+                    "cancer_type":      meta.get("cancer_type") or "—",
+                    "num_samples":      meta.get("num_samples") or "—",
+                    "reference_genome": meta.get("reference_genome") or "—",
+                    "files_analysed":   len(supp_tmps),
+                    "sheets_analysed":  len(records),
+                    "high_priority":    sum(1 for r in records if r.get("priority") == "HIGH"),
+                    "medium_priority":  sum(1 for r in records if r.get("priority") == "MEDIUM"),
+                    "not_loadable":     sum(1 for r in records if r.get("curability") == "NO"),
+                    "file_breakdown": [{
+                        "file":        r["file"],
+                        "sheet":       r["sheet"],
+                        "cbio_format": r.get("cbio_target_file", "—"),
+                        "curability":  r.get("curability", "NO"),
+                        "priority":    r.get("priority", "N/A"),
+                        "confidence":  r.get("confidence", 0),
+                        "verdict":     r.get("verdict", ""),
+                        "req_present": r.get("required_present", []),
+                        "req_missing": r.get("required_missing", []),
+                        "opt_present": r.get("optional_present", []),
+                    } for r in records],
+                }
+
+        except Exception as exc:
+            st.error(f"Curation failed: {exc}")
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
+            st.stop()
+        finally:
+            _safe_cleanup(pdf_tmp or "", *supp_tmps)
+
+        st.success("Curation complete.")
+        st.divider()
+        _render_inline_report(meta, records, summary)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 2 — File Classification
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_detect:
+    st.subheader("File Classification")
+    st.markdown(
+        "Upload a single supplementary data file to identify which cBioPortal "
+        "format it corresponds to. The tool checks column names and data patterns "
+        "against the cBioPortal specification, then uses AI for ambiguous cases."
+    )
+
+    detect_file = st.file_uploader(
+        "Select a file to classify",
+        type=["xlsx", "xls", "csv", "tsv", "txt", "maf"],
+        key="detect_file",
+    )
+    use_ai = st.checkbox(
+        "Use AI for ambiguous files (requires API key)", value=True, key="det_use_ai"
+    )
+
+    if st.button("Classify File", disabled=(detect_file is None), key="detect_btn"):
+        from file_parser import parse_file
+        from cbio_detector import detect_file_type
+
+        with st.spinner("Parsing file..."):
+            try:
+                df = parse_file(detect_file.getvalue(), detect_file.name)
+            except Exception as exc:
+                st.error(f"Could not read file: {exc}")
+                st.stop()
+
+        st.markdown("#### File Preview")
+        st.dataframe(df.head(10), use_container_width=True)
+
+        akey = _get_api_key() if use_ai else None
+        with st.spinner("Classifying..."):
+            try:
+                result = detect_file_type(df, anthropic_api_key=akey)
+            except Exception as exc:
+                st.error(f"Classification failed: {exc}")
+                st.stop()
+
+        st.divider()
+        ca, cb, cc = st.columns(3)
+        ca.metric("Detected Format",   result["type"])
+        cb.metric("Confidence",        f"{result['confidence']*100:.0f}%")
+        cc.metric("Method",
+                  "Rule-based" if result["method"] == "heuristic" else "AI-assisted")
+
+        if result.get("reasoning"):
+            st.info(result["reasoning"])
+        if result.get("low_confidence"):
+            st.warning("Confidence is low — please verify the detected format manually.")
+
+        if result.get("column_mappings"):
+            st.markdown("#### Suggested Column Mappings")
+            st.dataframe(
+                pd.DataFrame(
+                    list(result["column_mappings"].items()),
+                    columns=["Original Column", "cBioPortal Column"],
+                ),
+                use_container_width=True, hide_index=True,
+            )
+
+        # Spec-based detail
+        try:
+            from spec_match import classify_sheet
+            sr = classify_sheet(df)
+            with st.expander("Detailed classification scores"):
+                st.markdown(f"**Best match:** {sr.format_key} ({sr.confidence:.1f}% confidence)")
+                st.markdown(f"**Target file:** {sr.target_file}")
+                if sr.required_missing:
+                    st.warning("Missing required columns: " + ", ".join(sr.required_missing))
+                if sr.required_present:
+                    st.success("Required columns found: " + ", ".join(sr.required_present))
+                if sr.all_scores:
+                    st.dataframe(pd.DataFrame(sr.all_scores),
+                                 use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+>>>>>>> ab1ec797f04b92b9e780db2ae0d58ac09c48ecd7
