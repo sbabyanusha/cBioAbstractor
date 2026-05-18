@@ -9,8 +9,9 @@ This cleaned version keeps only:
 It removes merge-conflict markers, Docker/backend assumptions, and api_config.py usage.
 Set ANTHROPIC_API_KEY as an environment variable or Streamlit secret.
 """
-from normalizer import normalize_dataframe
+
 from __future__ import annotations
+from normalizer import normalize_dataframe
 
 import json
 import os

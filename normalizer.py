@@ -1,10 +1,13 @@
+import re
 import pandas as pd
 
 
 # -----------------------------------------------------------------------------
 # Canonical cBioPortal column mappings
 # -----------------------------------------------------------------------------
+
 COLUMN_MAP = {
+
     # Patient identifiers
     "patient": "PATIENT_ID",
     "patient_id": "PATIENT_ID",
@@ -37,6 +40,7 @@ COLUMN_MAP = {
 # -----------------------------------------------------------------------------
 # Normalize text helper
 # -----------------------------------------------------------------------------
+
 def normalize_text(text):
     """
     Normalize text for matching:
@@ -44,6 +48,7 @@ def normalize_text(text):
     - strip spaces
     - replace underscores
     """
+
     return (
         str(text)
         .strip()
@@ -53,8 +58,34 @@ def normalize_text(text):
 
 
 # -----------------------------------------------------------------------------
-# Normalize column names
+# NEW SINGLE COLUMN NORMALIZER
 # -----------------------------------------------------------------------------
+
+def normalize_column(column_name):
+    """
+    Normalize a SINGLE column name.
+
+    Example:
+    Tumor Sample Barcode
+    ->
+    tumor_sample_barcode
+    """
+
+    column_name = str(column_name).strip().lower()
+
+    column_name = re.sub(r"[\s\-]+", "_", column_name)
+
+    column_name = re.sub(r"[^a-z0-9_]", "", column_name)
+
+    column_name = re.sub(r"_+", "_", column_name)
+
+    return column_name
+
+
+# -----------------------------------------------------------------------------
+# Normalize column names in dataframe
+# -----------------------------------------------------------------------------
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rename messy columns into canonical cBioPortal columns.
@@ -63,11 +94,15 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     new_columns = {}
 
     for col in df.columns:
+
         normalized = normalize_text(col)
 
         if normalized in COLUMN_MAP:
+
             new_columns[col] = COLUMN_MAP[normalized]
+
         else:
+
             # fallback → uppercase cleaned version
             new_columns[col] = (
                 normalized
@@ -83,6 +118,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # Normalize values inside columns
 # -----------------------------------------------------------------------------
+
 def normalize_values(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize categorical values.
@@ -130,6 +166,7 @@ def normalize_values(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # Main normalization pipeline
 # -----------------------------------------------------------------------------
+
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Full normalization pipeline.
@@ -145,9 +182,9 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # Example local testing
 # -----------------------------------------------------------------------------
+
 if __name__ == "__main__":
 
-    # Example messy dataset
     data = {
         "patient": ["P1", "P2"],
         "gender": ["male", "f"],
