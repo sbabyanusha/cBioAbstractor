@@ -11,6 +11,7 @@ Set ANTHROPIC_API_KEY as an environment variable or Streamlit secret.
 """
 
 from __future__ import annotations
+from normalizer import normalize_dataframe
 
 import json
 import os
@@ -499,66 +500,158 @@ with tab_detect:
         type=["xlsx", "xls", "csv", "tsv", "txt", "tab", "maf"],
         key="detect_file",
     )
-    use_ai = st.checkbox("Use AI for ambiguous files", value=True, key="use_ai_detection")
+
+    use_ai = st.checkbox(
+        "Use AI for ambiguous files",
+        value=True,
+        key="use_ai_detection"
+    )
 
     if st.button("Classify File", disabled=detect_file is None):
+
         try:
             from cbio_detector import detect_file_type
             from file_parser import parse_file
+
         except Exception as exc:
             st.error(f"Could not load classification modules: {exc}")
             st.stop()
 
+        # ------------------------------------------------------------------
+        # Parse + Normalize
+        # ------------------------------------------------------------------
         with st.spinner("Parsing file..."):
+
             try:
-                df = parse_file(detect_file.getvalue(), detect_file.name)
+                df = parse_file(
+                    detect_file.getvalue(),
+                    detect_file.name
+                )
+
+                # Normalize dataframe
+                normalized_df = normalize_dataframe(df)
+
             except Exception as exc:
                 st.error(f"Could not read file: {exc}")
                 st.stop()
 
-        st.markdown("#### File Preview")
-        st.dataframe(df.head(10), use_container_width=True)
+        # ------------------------------------------------------------------
+        # Preview Tables
+        # ------------------------------------------------------------------
+        st.markdown("### Original File")
+        st.dataframe(
+            df.head(10),
+            use_container_width=True
+        )
 
+        st.markdown("### Normalized File")
+        st.dataframe(
+            normalized_df.head(10),
+            use_container_width=True
+        )
+
+        # ------------------------------------------------------------------
+        # Classification
+        # ------------------------------------------------------------------
         api_key = _get_api_key() if use_ai else None
+
         with st.spinner("Classifying file..."):
+
             try:
-                result = detect_file_type(df, anthropic_api_key=api_key)
+                result = detect_file_type(
+                    normalized_df,
+                    anthropic_api_key=api_key
+                )
+
             except Exception as exc:
                 st.error(f"Classification failed: {exc}")
                 st.stop()
 
         st.divider()
+
         col1, col2, col3 = st.columns(3)
-        col1.metric("Detected Format", result.get("type", "—"))
-        col2.metric("Confidence", f"{float(result.get('confidence', 0)) * 100:.0f}%")
-        col3.metric("Method", "Rule-based" if result.get("method") == "heuristic" else result.get("method", "—"))
+
+        col1.metric(
+            "Detected Format",
+            result.get("type", "—")
+        )
+
+        col2.metric(
+            "Confidence",
+            f"{float(result.get('confidence', 0)) * 100:.0f}%"
+        )
+
+        col3.metric(
+            "Method",
+            "Rule-based"
+            if result.get("method") == "heuristic"
+            else result.get("method", "—")
+        )
 
         if result.get("reasoning"):
             st.info(result["reasoning"])
+
         if result.get("low_confidence"):
-            st.warning("Confidence is low — please verify the detected format manually.")
+            st.warning(
+                "Confidence is low — please verify the detected format manually."
+            )
 
         mappings = result.get("column_mappings") or {}
+
         if mappings:
             st.markdown("#### Suggested Column Mappings")
+
             st.dataframe(
-                pd.DataFrame(list(mappings.items()), columns=["Original Column", "cBioPortal Column"]),
+                pd.DataFrame(
+                    list(mappings.items()),
+                    columns=[
+                        "Original Column",
+                        "cBioPortal Column"
+                    ]
+                ),
                 use_container_width=True,
                 hide_index=True,
             )
 
+        # ------------------------------------------------------------------
+        # Detailed Spec Matching
+        # ------------------------------------------------------------------
         try:
             from spec_match import classify_sheet
 
-            spec_result = classify_sheet(df)
+            spec_result = classify_sheet(normalized_df)
+
             with st.expander("Detailed classification scores"):
-                st.markdown(f"**Best match:** {spec_result.format_key} ({spec_result.confidence:.1f}% confidence)")
-                st.markdown(f"**Target file:** {spec_result.target_file}")
+
+                st.markdown(
+                    f"**Best match:** "
+                    f"{spec_result.format_key} "
+                    f"({spec_result.confidence:.1f}% confidence)"
+                )
+
+                st.markdown(
+                    f"**Target file:** "
+                    f"{spec_result.target_file}"
+                )
+
                 if spec_result.required_missing:
-                    st.warning("Missing required columns: " + ", ".join(spec_result.required_missing))
+                    st.warning(
+                        "Missing required columns: "
+                        + ", ".join(spec_result.required_missing)
+                    )
+
                 if spec_result.required_present:
-                    st.success("Required columns found: " + ", ".join(spec_result.required_present))
+                    st.success(
+                        "Required columns found: "
+                        + ", ".join(spec_result.required_present)
+                    )
+
                 if spec_result.all_scores:
-                    st.dataframe(pd.DataFrame(spec_result.all_scores), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        pd.DataFrame(spec_result.all_scores),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
         except Exception:
             pass
