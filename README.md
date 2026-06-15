@@ -8,6 +8,7 @@ cBioAbstractor is a Streamlit-based curation assistant for cancer genomics studi
 
 - Upload a cancer genomics paper PDF
 - Upload supplementary data files such as `.xlsx`, `.csv`, `.tsv`, `.txt`, `.maf`, `.docx`, and `.pdf`
+- Download supplementary files automatically from PubMed Central using a PMCID or PMID
 - Extract study-level metadata from the paper
 - Classify supplementary sheets against cBioPortal file-format schemas
 - Identify likely cBioPortal target files
@@ -74,11 +75,15 @@ pip install -r requirements.txt
 
 ## API Key Setup
 
-Set your Anthropic API key locally as an environment variable:
+Set either an Anthropic or OpenAI API key locally as an environment variable:
 
 ```bash
 export ANTHROPIC_API_KEY="your-api-key"
+# or
+export OPENAI_API_KEY="your-api-key"
 ```
+
+The Streamlit sidebar lets you choose between Anthropic and OpenAI models.
 
 Do not commit API keys to GitHub.
 
@@ -113,7 +118,7 @@ http://localhost:8501
 
 1. Open the Streamlit app
 2. Upload the main paper PDF
-3. Upload one or more supplementary files
+3. Upload one or more supplementary files, or enter a PMCID/PMID to fetch them from PubMed Central
 4. Run the curation workflow
 5. Review detected file types, required fields, and missing fields
 6. Download the generated cBioPortal curation report
@@ -167,4 +172,3 @@ These examples help the app recognize recurring supplemental file patterns.
 - Supplementary file classification
 - cBioPortal format assessment
 - Curation report generation
-
