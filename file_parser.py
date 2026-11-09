@@ -21,14 +21,19 @@ def _detect_encoding(raw: bytes) -> str:
 
 def _detect_separator(text: str) -> str:
     """Sniff tab vs comma vs semicolon vs pipe."""
-    first_lines = "\n".join(text.splitlines()[:10])
-    counts = {
-        "\t": first_lines.count("\t"),
-        ",": first_lines.count(","),
-        ";": first_lines.count(";"),
-        "|": first_lines.count("|"),
-    }
-    return max(counts, key=counts.get)
+    lines = [l for l in text.splitlines()[:10] if l.strip()]
+    candidates = ["\t", ",", ";", "|"]
+    counts = {s: sum(l.count(s) for l in lines) for s in candidates}
+    # A real delimiter appears the same number of times on every line, while
+    # commas inside free-text cells do not. Prefer such delimiters, and fall
+    # back to the raw counts when none is consistent (e.g. quoted CSV fields).
+    consistent = [
+        s for s in candidates
+        if lines and lines[0].count(s) > 0
+        and all(l.count(s) == lines[0].count(s) for l in lines)
+    ]
+    pool = consistent or candidates
+    return max(pool, key=lambda s: counts[s])
 
 
 def parse_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
